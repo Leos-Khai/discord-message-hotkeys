@@ -3,6 +3,7 @@
 #
 #   Alt+1  -> newest message   ...   Alt+9 -> 9th newest   Alt+0 -> 10th newest
 #   Alt+D  -> move focus to the "New messages" marker (first unread message)
+#   Alt+Shift+N -> cycle auto-reading of new messages: off / polite / interrupt
 #   Alt+Shift+D -> write a structure dump to the Downloads folder (debug)
 #
 # Named "discord.py" so NVDA auto-loads it for the "Discord.exe" process.
@@ -19,6 +20,7 @@
 import os
 import time
 from collections import deque
+import wx
 import appModuleHandler
 import api
 import ui
@@ -106,8 +108,17 @@ config.conf.spec[CONFIG_SECTION] = {
 RECENT_ANNOUNCED_CAP = 30
 # When auto-read is on, how far back from the newest row to look for the newest
 # real message (skipping date/"new" separators). Small: the newest is at/near
-# the bottom.
+# the bottom. Also the max number of new messages announced per poll (bursts).
 NEWEST_ROW_SCAN = 6
+# Auto-read polling: Discord does not reliably fire object events for new
+# message rows, so a light timer is the workhorse. Every tick (while auto-read
+# is on and Discord is focused) it cheaply re-reads the newest row and speaks
+# anything new. When off it is a single config read - effectively free.
+AUTO_POLL_INTERVAL_MS = 1500
+# Don't re-run the (potentially costly) full list search from the poller more
+# often than this when there is no valid cached list, e.g. on a non-channel
+# screen. On an open channel the cached list stays valid, so no search happens.
+SEARCH_THROTTLE_SEC = 3.0
 
 
 def getAutoReadMode():
@@ -132,6 +143,22 @@ class AppModule(appModuleHandler.AppModule):
         self._recentAnnounced = deque(maxlen=RECENT_ANNOUNCED_CAP)
         # Have we seeded the "already seen" set for the current channel yet?
         self._autoReadPrimed = False
+        # Name of the list we primed against, to notice channel switches.
+        self._autoReadChannel = None
+        # Throttle for full list searches driven by the poller.
+        self._lastSearchTime = 0.0
+        # Repeating timer that drives auto-read (created on the main thread).
+        self._pollTimer = None
+        self._scheduleAutoPoll()
+
+    def terminate(self, *args, **kwargs):
+        try:
+            if self._pollTimer is not None:
+                self._pollTimer.Stop()
+        except Exception:
+            pass
+        self._pollTimer = None
+        super(AppModule, self).terminate(*args, **kwargs)
 
     # -----------------------------------------------------------------------
     # Small safe helpers (single COM calls, with a light retry)
@@ -419,6 +446,160 @@ class AppModule(appModuleHandler.AppModule):
             label = "%d new messages" % count
         text = self._objectText(firstUnread)
         ui.message("%s. First: %s" % (label, text) if text else label)
+
+    # -----------------------------------------------------------------------
+    # Auto-read incoming messages (event driven; opt-in via Alt+Shift+N)
+    # -----------------------------------------------------------------------
+
+    @script(
+        description="Cycle auto-reading of new Discord messages: off, polite, interrupt",
+        gesture="kb:alt+shift+n",
+    )
+    def script_cycleAutoRead(self, gesture):
+        mode = (getAutoReadMode() + 1) % 3
+        setAutoReadMode(mode)
+        try:
+            config.conf.save()  # persist immediately, matching the settings panel
+        except Exception:
+            log.debug("Discord: could not save auto-read mode", exc_info=True)
+        # Turning it on: seed the "seen" set so we don't read the backlog that
+        # is already on screen - only messages that arrive from now on.
+        if mode != AUTO_OFF:
+            self._primeAutoRead()
+        ui.message(AUTO_MODE_NAMES.get(mode, "Auto-read"))
+
+    def _primeAutoRead(self):
+        """Remember the messages currently on screen as already-seen."""
+        self._recentAnnounced.clear()
+        listObj = self._findMessagesList()
+        if listObj is None:
+            self._autoReadPrimed = False
+            return
+        for obj in self._collectRecentMessages(listObj, NEWEST_ROW_SCAN):
+            text = self._objectText(obj)
+            if text:
+                self._recentAnnounced.append(text)
+        self._autoReadChannel = self._name(listObj)
+        self._autoReadPrimed = True
+
+    def _ancestorMessagesList(self, obj, maxUp=12):
+        """Return the messages LIST that obj lives under, or None.
+
+        A cheap bounded parent-walk - lets the show event handler ignore the
+        vast majority of events (which happen outside the message list).
+        """
+        node = obj
+        steps = 0
+        while node is not None and steps < maxUp:
+            steps += 1
+            if self._listStillValid(node):
+                return node
+            node = self._safe(lambda n=node: n.parent)
+        return None
+
+    def event_show(self, obj, nextHandler):
+        """Discord shows a new row when a message arrives; maybe announce it.
+
+        Kept extremely cheap and fully guarded: auto-read is off by default, and
+        even when on we bail immediately unless the shown object is inside the
+        messages list. Never raises into NVDA's event dispatch.
+        """
+        try:
+            self._maybeAnnounceNew(obj)
+        except Exception:
+            log.debug("Discord: auto-read event_show failed", exc_info=True)
+        nextHandler()
+
+    def _maybeAnnounceNew(self, shownObj):
+        """Event path: only proceed if the shown object is in the message list."""
+        if getAutoReadMode() == AUTO_OFF:
+            return
+        listObj = self._ancestorMessagesList(shownObj)
+        if listObj is None:
+            return
+        self._cachedList = listObj
+        self._announceNew(listObj)
+
+    # -- polling fallback ---------------------------------------------------
+
+    def _scheduleAutoPoll(self):
+        try:
+            self._pollTimer = wx.CallLater(AUTO_POLL_INTERVAL_MS, self._autoPollTick)
+        except Exception:
+            self._pollTimer = None
+
+    def _autoPollTick(self):
+        try:
+            if getAutoReadMode() != AUTO_OFF and self._discordIsForeground():
+                listObj = self._pollListObj()
+                if listObj is not None:
+                    self._announceNew(listObj)
+        except Exception:
+            log.debug("Discord: auto-read poll failed", exc_info=True)
+        finally:
+            self._scheduleAutoPoll()  # re-arm regardless
+
+    def _discordIsForeground(self):
+        fg = self._safe(lambda: api.getForegroundObject())
+        return fg is not None and getattr(fg, "processID", None) == self.processID
+
+    def _pollListObj(self):
+        """Cached messages list; only run the costly search on a throttle."""
+        if self._listStillValid(self._cachedList):
+            return self._cachedList
+        if time.time() - self._lastSearchTime < SEARCH_THROTTLE_SEC:
+            return None
+        self._lastSearchTime = time.time()
+        self._cachedList = self._searchMessagesList()
+        return self._cachedList
+
+    # -- shared announce ----------------------------------------------------
+
+    def _announceNew(self, listObj):
+        """Speak any newly-arrived messages at the bottom of listObj.
+
+        Shared by the event and poll paths. Primes (and stays quiet) the first
+        time or after a channel switch, so a channel's existing backlog is never
+        dumped - only messages that arrive afterwards.
+        """
+        mode = getAutoReadMode()
+        if mode == AUTO_OFF:
+            return
+        if not self._autoReadPrimed or self._name(listObj) != self._autoReadChannel:
+            self._primeAutoRead()
+            return
+        # Newest-first; stop at the first row we've already announced. Whatever
+        # is above that stopping point is new (handles small bursts too).
+        fresh = []
+        for obj in self._collectRecentMessages(listObj, NEWEST_ROW_SCAN):
+            text = self._objectText(obj)
+            if not text:
+                continue
+            if text in self._recentAnnounced:
+                break
+            fresh.append(text)
+        if not fresh:
+            return
+        # Speak oldest-first so the newest ends up last (and, in interrupt mode,
+        # is the one left audible). Only the first announce interrupts; the rest
+        # queue behind it so a burst reads in order.
+        interrupt = (mode == AUTO_INTERRUPT)
+        for i, text in enumerate(reversed(fresh)):
+            self._recentAnnounced.append(text)
+            self._announce(text, interrupt=(interrupt and i == 0))
+
+    def _announce(self, text, interrupt):
+        if interrupt:
+            self._safe(lambda: speech.cancelSpeech())
+        if Spri is not None:
+            self._safe(lambda: speech.speakMessage(text, priority=Spri.NORMAL))
+        else:
+            self._safe(lambda: speech.speakMessage(text))
+        try:
+            braille.handler.message(text)
+        except Exception:
+            pass
+        log.debug("Discord: auto-read announced: %r" % text[:80])
 
     # -----------------------------------------------------------------------
     # Debug: dump structure to a file in Downloads (uses safe navigation)
