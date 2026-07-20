@@ -11,6 +11,25 @@ the same commit that bumps the version.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-20
+
+### Changed
+
+- **The debug dump command has moved from Alt+Shift+D to NVDA+Ctrl+Shift+F10.**
+  Alt+Shift+D was easy to hit by accident, and the command writes the text of
+  on-screen messages to a file in Downloads, so an accidental press wrote
+  private conversation to disk without the user meaning to. The new gesture is
+  deliberately awkward.
+
+  If you had already assigned your own key to this command, your assignment is
+  unaffected. If you were using the default, it has changed; you can set it back
+  under Preferences, then Input Gestures, in the Discord Message Hotkeys
+  category.
+
+- The error message shown when messages cannot be read no longer names a
+  specific key for the dump command, so it stays correct if the command is
+  rebound.
+
 ## [0.7.1] - 2026-07-20
 
 Groundwork for submitting the add-on to the NVDA Add-on Store. No functional
@@ -68,7 +87,8 @@ feature set at 0.5.1 was:
 - Bounded, time-limited, and cached message-list search so the add-on cannot
   freeze NVDA. Outside a channel the hotkeys warn quickly instead of hanging.
 
-[Unreleased]: https://github.com/Leos-Khai/discord-message-hotkeys/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/Leos-Khai/discord-message-hotkeys/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Leos-Khai/discord-message-hotkeys/releases/tag/v0.8.0
 [0.7.1]: https://github.com/Leos-Khai/discord-message-hotkeys/releases/tag/v0.7.1
 [0.7.0]: https://github.com/Leos-Khai/discord-message-hotkeys/releases/tag/v0.7.0
 [0.6.1]: https://github.com/Leos-Khai/discord-message-hotkeys/releases/tag/v0.6.1

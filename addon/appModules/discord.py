@@ -4,7 +4,7 @@
 #   Alt+1  -> newest message   ...   Alt+9 -> 9th newest   Alt+0 -> 10th newest
 #   Alt+D  -> move focus to the "New messages" marker (first unread message)
 #   Alt+Shift+N -> cycle auto-reading of new messages: off / polite / interrupt
-#   Alt+Shift+D -> write a structure dump to the Downloads folder (debug)
+#   NVDA+Ctrl+Shift+F10 -> write a structure dump to the Downloads folder (debug)
 #
 # Named "discord.py" so NVDA auto-loads it for the "Discord.exe" process.
 #
@@ -333,7 +333,7 @@ class AppModule(appModuleHandler.AppModule):
                 # List was found but rows couldn't be read - drop the cache so
                 # the next press re-locates a fresh list object.
                 self._cachedList = None
-                ui.message("Couldn't read the messages. Try again, or run Alt+Shift+D.")
+                ui.message("Couldn't read the messages. Try again, or run the debug dump command.")
             else:
                 ui.message("Only %d messages are loaded." % len(messages))
             return
@@ -607,7 +607,9 @@ class AppModule(appModuleHandler.AppModule):
 
     @script(
         description="Discord debug: save a structure dump to the Downloads folder",
-        gesture="kb:alt+shift+d",
+        # Deliberately awkward: the dump writes message text to disk, so it must
+        # not be reachable by a slip of the hand. Rebindable in Input Gestures.
+        gesture="kb:NVDA+control+shift+f10",
     )
     def script_debugDump(self, gesture):
         path = os.path.join(self._downloadsDir(), "discord_nvda_dump.txt")

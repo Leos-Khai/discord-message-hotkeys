@@ -179,7 +179,7 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
-# NVDA structure dumps (Alt+Shift+D) may contain private message text — never commit them.
+# NVDA structure dumps (NVDA+Ctrl+Shift+F10) may contain private message text — never commit them.
 discord_nvda_dump*.txt
 docs/discord_nvda_dump.example.txt
 
