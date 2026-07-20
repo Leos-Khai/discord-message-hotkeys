@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The add-on imports NVDA modules, which don't exist off-device, so we
+      # can only check that it parses -- not that it runs.
+      - name: Syntax-check the add-on
+        run: python -m compileall -q addon
+
+      # Catches a missing entry on the PR rather than after the merge, where it
+      # would fail the release job instead.
+      - name: Check CHANGELOG.md covers the manifest version
+        run: python scripts/changelog.py "$(python -c 'import build; print(build.read_version())')" > /dev/null
+
+      - name: Build the add-on
+        run: python build.py
+
+      - name: Upload the built add-on
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvda-addon
+          path: dist/*.nvda-addon
+          if-no-files-found: error

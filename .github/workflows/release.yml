@@ -1,0 +1,115 @@
+name: Release
+
+# Releases are driven by the version in addon/manifest.ini. Bump it, add a
+# matching CHANGELOG.md section, push to main, and this tags + publishes. If the
+# version already has a tag, this is a no-op, so ordinary commits cost nothing.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write      # for build provenance attestation
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Read version from manifest
+        id: version
+        run: |
+          version=$(python -c "import build; print(build.read_version())")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this version is already released
+        id: check
+        run: |
+          if git rev-parse -q --verify "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null; then
+            echo "Tag ${{ steps.version.outputs.tag }} exists; nothing to release."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Done before the build so a missing entry fails fast, without tagging.
+      - name: Extract release notes from CHANGELOG.md
+        if: steps.check.outputs.needed == 'true'
+        run: python scripts/changelog.py "${{ steps.version.outputs.version }}" > notes.md
+
+      - name: Build the add-on
+        if: steps.check.outputs.needed == 'true'
+        run: python build.py
+
+      - name: Checksum the add-on
+        if: steps.check.outputs.needed == 'true'
+        id: checksum
+        run: |
+          cd dist
+          # Named exactly, not globbed: dist/ may hold older builds on a rerun.
+          # Must stay in step with the output name in build.py.
+          file="discordMessageHotkeys-v${{ steps.version.outputs.version }}.nvda-addon"
+          sha256sum "$file" > "$file.sha256"
+          echo "sha256=$(cut -d' ' -f1 < "$file.sha256")" >> "$GITHUB_OUTPUT"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+
+      # Signed, GitHub-hosted proof of which workflow and commit built this file.
+      # Anyone can check it with: gh attestation verify <file> --repo <owner>/<repo>
+      - name: Attest build provenance
+        if: steps.check.outputs.needed == 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/${{ steps.checksum.outputs.file }}
+
+      - name: Append verification instructions to the notes
+        if: steps.check.outputs.needed == 'true'
+        run: |
+          cat >> notes.md <<'EOF'
+
+          ## Verifying this download
+
+          SHA-256 of `${{ steps.checksum.outputs.file }}`:
+
+          ```
+          ${{ steps.checksum.outputs.sha256 }}
+          ```
+
+          In PowerShell, compare it against your copy:
+
+          ```powershell
+          Get-FileHash .\${{ steps.checksum.outputs.file }} -Algorithm SHA256
+          ```
+
+          Or verify the signed build provenance with the GitHub CLI:
+
+          ```
+          gh attestation verify ${{ steps.checksum.outputs.file }} --repo ${{ github.repository }}
+          ```
+          EOF
+
+      - name: Tag the release
+        if: steps.check.outputs.needed == 'true'
+        run: |
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Publish the GitHub Release
+        if: steps.check.outputs.needed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: v${{ steps.version.outputs.version }}
+          body_path: notes.md
+          files: |
+            dist/${{ steps.checksum.outputs.file }}
+            dist/${{ steps.checksum.outputs.file }}.sha256
