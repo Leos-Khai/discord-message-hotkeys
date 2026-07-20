@@ -11,6 +11,22 @@ the same commit that bumps the version.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-07-20
+
+Groundwork for submitting the add-on to the NVDA Add-on Store. No functional
+changes: hotkey behavior is identical to 0.7.0.
+
+### Added
+
+- A user guide at `addon/doc/en/readme.html`. The manifest's `docFileName` has
+  always pointed at this file, but it did not exist, so the Help button in
+  NVDA's Add-ons Manager had nothing to open.
+
+### Fixed
+
+- The manifest's `url` field was empty; it now points at the source repository.
+  The Add-on Store requires it, and it must be HTTPS.
+
 ## [0.7.0] - 2026-07-20
 
 No functional changes to the add-on: hotkey behavior is identical to 0.6.1. This
@@ -52,7 +68,8 @@ feature set at 0.5.1 was:
 - Bounded, time-limited, and cached message-list search so the add-on cannot
   freeze NVDA. Outside a channel the hotkeys warn quickly instead of hanging.
 
-[Unreleased]: https://github.com/Leos-Khai/discord-message-hotkeys/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Leos-Khai/discord-message-hotkeys/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/Leos-Khai/discord-message-hotkeys/releases/tag/v0.7.1
 [0.7.0]: https://github.com/Leos-Khai/discord-message-hotkeys/releases/tag/v0.7.0
 [0.6.1]: https://github.com/Leos-Khai/discord-message-hotkeys/releases/tag/v0.6.1
 [0.5.1]: https://github.com/Leos-Khai/discord-message-hotkeys/releases/tag/v0.5.1

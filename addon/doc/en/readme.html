@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Discord Message Hotkeys</title>
+</head>
+<body>
+
+<h1>Discord Message Hotkeys</h1>
+
+<p>Read recent messages in the Discord desktop client without moving your focus
+or your caret. You can be typing in the compose box, press a hotkey to hear an
+earlier message, and carry on typing where you left off.</p>
+
+<p>The add-on loads automatically when you are in the Discord desktop
+application. It does not affect Discord in a web browser.</p>
+
+<h2>Reading recent messages</h2>
+
+<p>Alt plus a number reads one of the last ten messages in the channel or direct
+message you currently have open:</p>
+
+<ul>
+<li><strong>Alt+1</strong> reads the newest message.</li>
+<li><strong>Alt+2</strong> reads the message before that, and so on.</li>
+<li><strong>Alt+9</strong> reads the ninth newest message.</li>
+<li><strong>Alt+0</strong> reads the tenth newest message.</li>
+</ul>
+
+<p>Your focus and caret do not move, so these keys are safe to press while
+composing a message.</p>
+
+<p>Discord only keeps the messages near your current scroll position available
+to a screen reader, so fewer than ten may be readable. When that happens the
+add-on tells you how many are loaded rather than reporting an error. If you are
+not in a channel or direct message at all, it says so quickly instead of
+searching.</p>
+
+<h2>Jumping to your first unread message</h2>
+
+<p><strong>Alt+D</strong> moves focus to the first unread message, which is the
+message just after Discord's "New messages" marker. NVDA reads the message you
+land on, and Discord's own Up and Down arrows then walk through the rest.</p>
+
+<p>Unlike the reading hotkeys, this one deliberately moves your focus, because
+being taken to the message is the point of the command.</p>
+
+<p>If there is no unread marker in the channel, the add-on tells you there are no
+new messages. If the marker is scrolled far out of view it may not be findable,
+and the add-on says that too.</p>
+
+<h2>Reading new messages automatically</h2>
+
+<p><strong>Alt+Shift+N</strong> cycles automatic reading of incoming messages in
+the channel you have open, through three modes:</p>
+
+<ul>
+<li><strong>Off</strong> — no automatic reading. This is the default.</li>
+<li><strong>Polite</strong> — a new message waits until NVDA has finished
+whatever it is currently saying.</li>
+<li><strong>Interrupt</strong> — a new message is spoken straight away, cutting
+off current speech.</li>
+</ul>
+
+<p>Switching this on does not read the messages already on screen. Only messages
+that arrive afterwards are announced. The same is true when you change channel:
+the existing conversation is never dumped at you.</p>
+
+<p>Automatic reading only happens while Discord is the focused application, and
+only for the channel you have open. The mode is remembered when NVDA restarts.</p>
+
+<p>You can also set the starting mode without using the hotkey. Open the NVDA
+menu, choose Preferences, then Settings, and select the <strong>Discord Message
+Hotkeys</strong> category. The setting there and the Alt+Shift+N hotkey control
+the same option, so they always agree.</p>
+
+<h2>Changing the key assignments</h2>
+
+<p>All of these commands can be reassigned. In the NVDA menu choose Preferences,
+then Input Gestures, and look under the <strong>Discord Message Hotkeys</strong>
+category.</p>
+
+<h2>Reporting a problem</h2>
+
+<p><strong>Alt+Shift+D</strong> saves a description of Discord's current
+accessibility structure to a file named <code>discord_nvda_dump.txt</code> in
+your Downloads folder, and tells you when it has finished. Attaching that file
+to a bug report makes a problem far easier to diagnose, because it shows exactly
+how Discord was presenting the message list at the time.</p>
+
+<p>Please be aware that this dump contains the text of messages that were on
+screen when you pressed the key. Read through it, or remove anything private,
+before sharing it publicly.</p>
+
+<h2>Licence</h2>
+
+<p>Copyright (C) Khai. This add-on is free software, released under the GNU
+General Public License version 2. See the file <code>LICENSE</code> in the
+source repository for the full terms.</p>
+
+</body>
+</html>
