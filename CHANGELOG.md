@@ -11,6 +11,56 @@ the same commit that bumps the version.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-07-21
+
+Fixes direct messages intermittently reporting "No messages here" when they were
+open and full of messages. No gestures changed.
+
+### Fixed
+
+- **Alt+1 through Alt+0 and Alt+D now work reliably in direct messages.** They
+  would sometimes report "No messages here. Open a text channel or DM to read
+  messages." in a DM that was plainly open, then work on the next attempt.
+
+  The 0.6 second limit on searching for the message list, added in 0.6.1 to stop
+  the add-on hanging on the Friends and Home screens, was too tight. Finding the
+  list from a standing start takes roughly 500 calls into Discord, and when
+  Discord is busy those calls slow down enough to cross the limit — so the search
+  gave up and reported an empty channel. Whether it crossed the line varied from
+  press to press, which is why the fault came and went.
+
+  Anyone who found that turning on auto-read with Alt+Shift+N made the problem
+  mostly disappear was seeing this too: auto-read's background timer kept the
+  message list cached, so the hotkeys were skipping the search rather than
+  succeeding at it.
+
+### Changed
+
+- The add-on now finds the message list by starting from where you are focused
+  and looking outward to the surrounding conversation area, instead of searching
+  the whole Discord window from the top. This takes about a quarter as many calls
+  into Discord, so the search is much less likely to run out of time. If Discord
+  changes its layout, the add-on falls back to the old whole-window search.
+
+- A key press now gets up to 2 seconds to find the message list, while background
+  checks keep the tighter 0.6 second limit. When you press a key you are waiting
+  on purpose and would rather wait a moment than be told a DM is empty. This
+  longer limit applies only inside a conversation; see below.
+
+- The message list is now kept ready in the background whether or not auto-read
+  is switched on, so the first hotkey press after opening a channel no longer
+  pays for the search. Previously only auto-read users got this.
+
+- The Friends, Home, and Settings screens are now detected by the absence of a
+  conversation area around your focus, rather than by waiting for a search to run
+  out of time. On those screens the hotkeys give up after 0.35 seconds instead of
+  the previous 0.6, so the "no messages here" warning comes back sooner.
+
+- Reduced the background work the add-on does while Discord is open. When
+  auto-read is off it now checks every 5 seconds instead of every 1.5, and each
+  check normally inspects one message instead of six — roughly 20 calls into
+  Discord per minute, down from about 500.
+
 ## [0.8.0] - 2026-07-20
 
 ### Changed
@@ -87,7 +137,8 @@ feature set at 0.5.1 was:
 - Bounded, time-limited, and cached message-list search so the add-on cannot
   freeze NVDA. Outside a channel the hotkeys warn quickly instead of hanging.
 
-[Unreleased]: https://github.com/Leos-Khai/discord-message-hotkeys/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/Leos-Khai/discord-message-hotkeys/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/Leos-Khai/discord-message-hotkeys/releases/tag/v0.8.1
 [0.8.0]: https://github.com/Leos-Khai/discord-message-hotkeys/releases/tag/v0.8.0
 [0.7.1]: https://github.com/Leos-Khai/discord-message-hotkeys/releases/tag/v0.7.1
 [0.7.0]: https://github.com/Leos-Khai/discord-message-hotkeys/releases/tag/v0.7.0

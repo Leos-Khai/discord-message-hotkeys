@@ -53,11 +53,27 @@ MESSAGES_LIST_NAME_PREFIX = "messages"
 # Safety caps so nothing can freeze NVDA.
 SEARCH_NODE_CAP = 15000     # max objects visited while locating the list
 SEARCH_MAX_DEPTH = 45       # max descent depth while locating the list
-SEARCH_TIME_BUDGET = 0.6    # max wall-clock seconds for one list search.
-#   This is the real anti-lag guard: on a non-channel screen (Friends, Home,
-#   Settings) there is no "Messages in..." list, so the search would otherwise
-#   walk the whole tree (~15000 COM round-trips = the ~5s hang). The budget
-#   makes it give up in well under a second and warn instead.
+
+# Wall-clock budget for one list search. Split by who asked, because the two
+# callers have opposite needs:
+#   INTERACTIVE - the user pressed Alt+1. They are waiting on purpose and would
+#       far rather wait a beat than be told "No messages here" in an open DM.
+#       0.6s was too tight: a cold search is ~500 COM round-trips, and against a
+#       busy Chromium renderer those cost 1-5ms each, so the search intermittently
+#       blew the budget and reported an empty channel. That was the DM flakiness.
+#   BACKGROUND - the auto-read poller. Must stay tight; it runs unattended.
+SEARCH_BUDGET_INTERACTIVE = 2.0
+SEARCH_BUDGET_BACKGROUND = 0.6
+#   NO_ANCHOR - no "(channel)" landmark around the focus. That is already a
+#       confident "not in a conversation", so the whole-window fallback exists
+#       only to survive a Discord markup change and must not make the everyday
+#       Friends/Home/Settings case wait. Kept well under the old 0.6s, because
+#       here we expect to find nothing and are just confirming it.
+SEARCH_BUDGET_NO_ANCHOR = 0.35
+#   The budget is a backstop, not the main anti-lag guard any more - see
+#   _channelAnchor(). On a non-channel screen (Friends, Home, Settings) there is
+#   no channel landmark in the focus ancestry, so the search now bails in a
+#   handful of COM calls instead of walking the whole tree (the old ~5s hang).
 SIBLING_WALK_CAP = 250      # max rows to step through when collecting messages
 CHILD_ITER_CAP = 600        # max children to iterate for any one node
 
@@ -67,15 +83,27 @@ try:
     ROLE_LISTITEM = controlTypes.Role.LISTITEM
     ROLE_ARTICLE = controlTypes.Role.ARTICLE
     ROLE_SEPARATOR = controlTypes.Role.SEPARATOR
+    ROLE_LANDMARK = controlTypes.Role.LANDMARK
     STATE_FOCUSABLE = controlTypes.State.FOCUSABLE
 except AttributeError:
     ROLE_LIST = controlTypes.ROLE_LIST
     ROLE_LISTITEM = controlTypes.ROLE_LISTITEM
     ROLE_ARTICLE = controlTypes.ROLE_ARTICLE
     ROLE_SEPARATOR = controlTypes.ROLE_SEPARATOR
+    ROLE_LANDMARK = controlTypes.ROLE_LANDMARK
     STATE_FOCUSABLE = controlTypes.STATE_FOCUSABLE
 
 MESSAGE_ROLES = {ROLE_LISTITEM, ROLE_ARTICLE}
+
+# Discord wraps the whole conversation area in a landmark whose accessible name
+# ends "(channel)" - confirmed from a live DM dump: "Æthelberht (channel)". It is
+# the common ancestor of BOTH the compose box and the messages list, so it is the
+# ideal place to start looking: it scopes the search to the conversation and can
+# never wander into the servers sidebar or the "Direct Messages" list.
+CHANNEL_LANDMARK_SUFFIX = "(channel)"
+# Max parent hops from the focused object up to that landmark. Measured at 5 in a
+# live DM (compose box depth 23 -> landmark depth 18); 12 leaves generous slack.
+ANCHOR_WALK_CAP = 12
 
 # "1".."9" -> 0..8 (count back from newest); "0" -> 9 (10th newest).
 KEY_TO_INDEX = {str(n): n - 1 for n in range(1, 10)}
@@ -115,6 +143,11 @@ NEWEST_ROW_SCAN = 6
 # is on and Discord is focused) it cheaply re-reads the newest row and speaks
 # anything new. When off it is a single config read - effectively free.
 AUTO_POLL_INTERVAL_MS = 1500
+# When auto-read is OFF the tick still runs, but only to keep the list cache warm
+# so Alt+1 never pays for a cold search. Cache warmth has no deadline the way an
+# incoming message does, so poll far less often - same benefit, a third of the
+# wakeups. (Warming at the auto-read cadence would be pure waste.)
+IDLE_POLL_INTERVAL_MS = 5000
 # Don't re-run the (potentially costly) full list search from the poller more
 # often than this when there is no valid cached list, e.g. on a non-channel
 # screen. On an open channel the cached list stays valid, so no search happens.
@@ -208,19 +241,56 @@ class AppModule(appModuleHandler.AppModule):
             and name.lower().startswith(MESSAGES_LIST_NAME_PREFIX)
         )
 
-    def _findMessagesList(self):
+    def _findMessagesList(self, budget=SEARCH_BUDGET_INTERACTIVE):
         if self._listStillValid(self._cachedList):
             return self._cachedList
-        self._cachedList = self._searchMessagesList()
+        self._cachedList = self._searchMessagesList(budget)
         return self._cachedList
 
-    def _searchMessagesList(self):
-        """Bounded depth-first search for the messages LIST (no bulk fetches)."""
-        fg = api.getForegroundObject()
-        if fg is None:
+    def _channelAnchor(self):
+        """Return the "<name> (channel)" landmark around the focus, or None.
+
+        Walking UP from the focused object is enormously cheaper than sweeping
+        down from the foreground window: measured on a live DM, anchoring here
+        costs ~119 COM calls against ~490 for the full-tree search, because the
+        landmark is only ~5 parent hops from the compose box and its subtree is
+        just the conversation.
+
+        It also self-corrects on a channel switch - focus moves, so the anchor
+        moves - and it is the cheap bail-out on non-channel screens (Friends,
+        Home, Settings), where no such landmark exists in the focus ancestry.
+        """
+        node = self._safe(lambda: api.getFocusObject())
+        steps = 0
+        while node is not None and steps < ANCHOR_WALK_CAP:
+            steps += 1
+            if self._role(node) == ROLE_LANDMARK:
+                name = (self._name(node) or "").strip().lower()
+                if name.endswith(CHANNEL_LANDMARK_SUFFIX):
+                    return node
+            node = self._safe(lambda n=node: n.parent)
+        return None
+
+    def _searchMessagesList(self, budget=SEARCH_BUDGET_INTERACTIVE):
+        """Bounded depth-first search for the messages LIST (no bulk fetches).
+
+        Starts from the channel landmark when one is reachable from the focus,
+        and only falls back to the whole foreground tree if it is not - so a
+        Discord markup change degrades to the old behaviour instead of breaking.
+
+        That fallback must stay on a short leash. Missing anchor is the normal
+        state on the Friends/Home/Settings screens, so charging it the full
+        interactive budget made the "not in a channel" warning slower than it had
+        ever been - the opposite of what the anchor is for.
+        """
+        root = self._channelAnchor()
+        if root is None:
+            root = self._safe(lambda: api.getForegroundObject())
+            budget = min(budget, SEARCH_BUDGET_NO_ANCHOR)
+        if root is None:
             return None
-        deadline = time.time() + SEARCH_TIME_BUDGET
-        stack = [(fg, 0)]
+        deadline = time.time() + budget
+        stack = [(root, 0)]
         visited = 0
         while stack:
             obj, depth = stack.pop()
@@ -246,6 +316,29 @@ class AppModule(appModuleHandler.AppModule):
     # -----------------------------------------------------------------------
     # Collect recent messages WITHOUT a bulk children fetch
     # -----------------------------------------------------------------------
+
+    def _iterMessageRows(self, listObj, limit):
+        """Yield up to `limit` message rows, newest first, one COM step at a time.
+
+        The lazy twin of _collectRecentMessages. It exists for the auto-read
+        poller, whose overwhelmingly common outcome is "nothing new": that only
+        needs the newest row, but _collectRecentMessages eagerly walked all
+        NEWEST_ROW_SCAN (6) of them before the caller could look at the first and
+        stop. Yielding lets the poller pay for one row (~2 COM calls) in the
+        steady state instead of six (~13), every 1.5s, forever.
+
+        No text fallback here - that only matters to the read hotkeys, which keep
+        using _collectRecentMessages.
+        """
+        node = self._safe(lambda: listObj.lastChild)
+        steps = 0
+        found = 0
+        while node is not None and steps < SIBLING_WALK_CAP and found < limit:
+            steps += 1
+            if self._role(node) in MESSAGE_ROLES:
+                found += 1
+                yield node
+            node = self._safe(lambda n=node: n.previous)
 
     def _collectRecentMessages(self, listObj, limit):
         """Return up to `limit` message rows, newest first.
@@ -523,16 +616,27 @@ class AppModule(appModuleHandler.AppModule):
     # -- polling fallback ---------------------------------------------------
 
     def _scheduleAutoPoll(self):
+        # Re-decided every tick, so toggling Alt+Shift+N takes effect within one
+        # interval without needing to touch the timer from anywhere else.
+        interval = (AUTO_POLL_INTERVAL_MS if getAutoReadMode() != AUTO_OFF
+                    else IDLE_POLL_INTERVAL_MS)
         try:
-            self._pollTimer = wx.CallLater(AUTO_POLL_INTERVAL_MS, self._autoPollTick)
+            self._pollTimer = wx.CallLater(interval, self._autoPollTick)
         except Exception:
             self._pollTimer = None
 
     def _autoPollTick(self):
         try:
-            if getAutoReadMode() != AUTO_OFF and self._discordIsForeground():
+            if self._discordIsForeground():
+                # Warm the list cache even when auto-read is OFF. Discovered from
+                # a user report: DMs were flaky with auto-read off but reliable
+                # with it on. The reason was not auto-read itself - it was that
+                # the poller kept _cachedList populated, so Alt+1 never had to run
+                # a cold search. Warming unconditionally gives every user that
+                # benefit. A tick with a valid cache is 2 COM calls (role + name);
+                # with no channel landmark in focus it bails in a handful more.
                 listObj = self._pollListObj()
-                if listObj is not None:
+                if listObj is not None and getAutoReadMode() != AUTO_OFF:
                     self._announceNew(listObj)
         except Exception:
             log.debug("Discord: auto-read poll failed", exc_info=True)
@@ -550,7 +654,8 @@ class AppModule(appModuleHandler.AppModule):
         if time.time() - self._lastSearchTime < SEARCH_THROTTLE_SEC:
             return None
         self._lastSearchTime = time.time()
-        self._cachedList = self._searchMessagesList()
+        # Tight budget: this runs unattended every 1.5s, so it must never stall.
+        self._cachedList = self._searchMessagesList(SEARCH_BUDGET_BACKGROUND)
         return self._cachedList
 
     # -- shared announce ----------------------------------------------------
@@ -571,13 +676,28 @@ class AppModule(appModuleHandler.AppModule):
         # Newest-first; stop at the first row we've already announced. Whatever
         # is above that stopping point is new (handles small bursts too).
         fresh = []
-        for obj in self._collectRecentMessages(listObj, NEWEST_ROW_SCAN):
+        sawRow = False
+        for obj in self._iterMessageRows(listObj, NEWEST_ROW_SCAN):
+            sawRow = True
             text = self._objectText(obj)
             if not text:
                 continue
             if text in self._recentAnnounced:
                 break
             fresh.append(text)
+        if not sawRow:
+            # The lazy walk deliberately has no "any row with text" fallback, so
+            # if Discord ever changes the row role it would yield nothing and
+            # auto-read would go silent - the one failure mode a blind user cannot
+            # notice. Retry through the eager collector, which does have that
+            # fallback. Only reachable when the fast path found no rows at all.
+            for obj in self._collectRecentMessages(listObj, NEWEST_ROW_SCAN):
+                text = self._objectText(obj)
+                if not text:
+                    continue
+                if text in self._recentAnnounced:
+                    break
+                fresh.append(text)
         if not fresh:
             return
         # Speak oldest-first so the newest ends up last (and, in interrupt mode,
