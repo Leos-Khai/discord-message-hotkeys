@@ -11,6 +11,36 @@ the same commit that bumps the version.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-28
+
+### Added
+
+- **Press a reading hotkey twice quickly to reply to that message.** Alt+1 Alt+1
+  replies to the newest message, Alt+3 Alt+3 to the third newest, and so on for
+  every key from Alt+1 to Alt+0. The add-on selects the message, asks Discord to
+  reply to it, and confirms with "Replying to" and the author's name, leaving you
+  in the compose box with the reply attached.
+
+  The gap allowed between the two presses is NVDA's own multi-press timeout —
+  half a second by default — so it matches the timing of every other double-press
+  command you already use.
+
+  A single press behaves exactly as before and still does not move your focus.
+  The second press does move focus, deliberately, in the same way Alt+D does: a
+  reply has to be attached to a message Discord considers selected.
+
+  Each step is checked rather than assumed. If the message cannot be selected,
+  or Discord's reply command cannot be found, or the reply does not open, the
+  add-on says so — rather than leaving you typing an answer that is going
+  nowhere.
+
+### Changed
+
+- The debug dump now includes a section describing the focused object, its
+  ancestors, and the tree around it. Taking a dump while a message is focused
+  shows exactly which controls Discord has built for that message, which is the
+  fastest way to diagnose a command that has stopped working.
+
 ## [0.8.1] - 2026-07-21
 
 Fixes direct messages intermittently reporting "No messages here" when they were
@@ -137,7 +167,8 @@ feature set at 0.5.1 was:
 - Bounded, time-limited, and cached message-list search so the add-on cannot
   freeze NVDA. Outside a channel the hotkeys warn quickly instead of hanging.
 
-[Unreleased]: https://github.com/Leos-Khai/discord-message-hotkeys/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/Leos-Khai/discord-message-hotkeys/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/Leos-Khai/discord-message-hotkeys/releases/tag/v0.9.0
 [0.8.1]: https://github.com/Leos-Khai/discord-message-hotkeys/releases/tag/v0.8.1
 [0.8.0]: https://github.com/Leos-Khai/discord-message-hotkeys/releases/tag/v0.8.0
 [0.7.1]: https://github.com/Leos-Khai/discord-message-hotkeys/releases/tag/v0.7.1

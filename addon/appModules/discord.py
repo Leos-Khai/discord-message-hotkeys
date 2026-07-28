@@ -2,6 +2,7 @@
 # Discord Message Hotkeys - NVDA app module for the Discord desktop client.
 #
 #   Alt+1  -> newest message   ...   Alt+9 -> 9th newest   Alt+0 -> 10th newest
+#   Alt+1 twice quickly -> reply to that message (same for Alt+2 .. Alt+0)
 #   Alt+D  -> move focus to the "New messages" marker (first unread message)
 #   Alt+Shift+N -> cycle auto-reading of new messages: off / polite / interrupt
 #   NVDA+Ctrl+Shift+F10 -> write a structure dump to the Downloads folder (debug)
@@ -23,12 +24,14 @@ from collections import deque
 import wx
 import appModuleHandler
 import api
+import core
 import ui
 import config
 import speech
 import braille
 import controlTypes
 import textInfos
+from keyboardHandler import KeyboardInputGesture
 from scriptHandler import script
 from logHandler import log
 
@@ -84,6 +87,10 @@ try:
     ROLE_ARTICLE = controlTypes.Role.ARTICLE
     ROLE_SEPARATOR = controlTypes.Role.SEPARATOR
     ROLE_LANDMARK = controlTypes.Role.LANDMARK
+    ROLE_EDITABLETEXT = controlTypes.Role.EDITABLETEXT
+    ROLE_BUTTON = controlTypes.Role.BUTTON
+    ROLE_MENUITEM = controlTypes.Role.MENUITEM
+    ROLE_POPUPMENU = controlTypes.Role.POPUPMENU
     STATE_FOCUSABLE = controlTypes.State.FOCUSABLE
 except AttributeError:
     ROLE_LIST = controlTypes.ROLE_LIST
@@ -91,9 +98,17 @@ except AttributeError:
     ROLE_ARTICLE = controlTypes.ROLE_ARTICLE
     ROLE_SEPARATOR = controlTypes.ROLE_SEPARATOR
     ROLE_LANDMARK = controlTypes.ROLE_LANDMARK
+    ROLE_EDITABLETEXT = controlTypes.ROLE_EDITABLETEXT
+    ROLE_BUTTON = controlTypes.ROLE_BUTTON
+    ROLE_MENUITEM = controlTypes.ROLE_MENUITEM
+    ROLE_POPUPMENU = controlTypes.ROLE_POPUPMENU
     STATE_FOCUSABLE = controlTypes.STATE_FOCUSABLE
 
 MESSAGE_ROLES = {ROLE_LISTITEM, ROLE_ARTICLE}
+# Roles a "Reply" control could plausibly have. Kept wide: Discord builds its
+# menus and toolbars in HTML, so the exact role is Discord's choice, not a
+# platform guarantee.
+ACTION_ROLES = {ROLE_BUTTON, ROLE_MENUITEM, ROLE_LISTITEM}
 
 # Discord wraps the whole conversation area in a landmark whose accessible name
 # ends "(channel)" - confirmed from a live DM dump: "Æthelberht (channel)". It is
@@ -108,6 +123,52 @@ ANCHOR_WALK_CAP = 12
 # "1".."9" -> 0..8 (count back from newest); "0" -> 9 (10th newest).
 KEY_TO_INDEX = {str(n): n - 1 for n in range(1, 10)}
 KEY_TO_INDEX["0"] = 9
+
+# ---------------------------------------------------------------------------
+# Reply to a message (press the same Alt+number twice, quickly)
+# ---------------------------------------------------------------------------
+
+# Discord documents single-key shortcuts on a focused message row (R replies, E
+# edits, P pins, + reacts), but they DO NOT work when NVDA moves focus to the row
+# programmatically: Discord only arms them in its own "keyboard mode", which it
+# enters when you arrow into the list yourself. A synthetic setFocus() leaves that
+# state unset, so Discord falls back to its "type anywhere to start composing"
+# behaviour and the R is typed into the compose box as a literal letter. Tested on
+# device in 0.9.0 - that is exactly what happened. Do not reintroduce the keypress.
+#
+# So we invoke Discord's own Reply control through the accessibility API instead,
+# which needs no keyboard state: find the object named "Reply" and doAction() it.
+# Two places to look, in order of preference:
+#   1. The message's action toolbar (the buttons revealed alongside a focused or
+#      hovered message). Silent and instant when present.
+#   2. The message context menu, opened with the Applications key. A non-printable
+#      key, so unlike "r" it cannot be swallowed into the compose box.
+REPLY_CONTROL_NAME = "reply"
+# Bounds for the two searches, in the spirit of every other walk here.
+REPLY_SUBTREE_NODE_CAP = 400
+REPLY_SUBTREE_MAX_DEPTH = 8
+REPLY_MENU_NODE_CAP = 400
+REPLY_MENU_MAX_DEPTH = 10
+# Time for Discord to build and show the context menu before we search it.
+REPLY_MENU_DELAY_MS = 300
+
+# Used only if NVDA's own multi-press timeout can't be read. NVDA's default is
+# also 0.5s, so this is the same number from a different source, not a guess.
+DOUBLE_PRESS_FALLBACK_SEC = 0.5
+# Clamp whatever NVDA reports: too short makes the second press unhittable, too
+# long makes two separate reads look like one reply.
+DOUBLE_PRESS_MIN_SEC = 0.2
+DOUBLE_PRESS_MAX_SEC = 1.5
+
+# setFocus() returns before Chromium has actually moved focus, so the "r" has to
+# wait a beat - sent too early it lands on whatever had focus before (usually the
+# compose box, where it would be typed as a literal letter). Both steps are
+# verified rather than assumed; see _sendReplyKey / _confirmReply.
+REPLY_FOCUS_DELAY_MS = 150
+# Time for Discord to open the reply composer before we check that it did. Also
+# lets NVDA finish announcing the compose box, so our confirmation is not spoken
+# into the middle of it (a focus change cancels queued speech).
+REPLY_CONFIRM_DELAY_MS = 450
 
 # ---------------------------------------------------------------------------
 # Auto-read of incoming messages (opt-in; Alt+Shift+N cycles the mode)
@@ -180,6 +241,9 @@ class AppModule(appModuleHandler.AppModule):
         self._autoReadChannel = None
         # Throttle for full list searches driven by the poller.
         self._lastSearchTime = 0.0
+        # Last read hotkey and when it was pressed, for double-press-to-reply.
+        self._lastReadKey = None
+        self._lastReadTime = 0.0
         # Repeating timer that drives auto-read (created on the main thread).
         self._pollTimer = None
         self._scheduleAutoPoll()
@@ -437,14 +501,226 @@ class AppModule(appModuleHandler.AppModule):
     # Read commands
     # -----------------------------------------------------------------------
 
+    @staticmethod
+    def _doublePressTimeout():
+        """How long after a read press a second press counts as "reply to that".
+
+        Deliberately NVDA's own multi-press timeout, so this matches every other
+        double-press command the user already knows (and follows it if they
+        change it in Keyboard settings).
+        """
+        try:
+            # NVDA stores this in milliseconds (configSpec: default=500).
+            timeout = float(config.conf["keyboard"]["multiPressTimeout"]) / 1000.0
+        except Exception:
+            timeout = DOUBLE_PRESS_FALLBACK_SEC
+        return min(max(timeout, DOUBLE_PRESS_MIN_SEC), DOUBLE_PRESS_MAX_SEC)
+
     @script(
-        description="Read one of the last 10 Discord messages (Alt+1 newest ... Alt+0 10th)",
+        description=(
+            "Read one of the last 10 Discord messages (Alt+1 newest ... Alt+0 10th);"
+            " press the same key twice quickly to reply to that message"
+        ),
         gestures=["kb:alt+%d" % n for n in range(1, 10)] + ["kb:alt+0"],
     )
     def script_readRecentMessage(self, gesture):
-        index = KEY_TO_INDEX.get(gesture.mainKeyName)
-        if index is not None:
-            self._readMessage(index)
+        key = gesture.mainKeyName
+        index = KEY_TO_INDEX.get(key)
+        if index is None:
+            return
+        # Track the key itself, not just the script. All ten gestures share one
+        # script, so NVDA's getLastScriptRepeatCount() would read Alt+1 then a
+        # quick Alt+2 as a repeat and reply to the wrong message.
+        now = time.time()
+        isRepeat = (key == self._lastReadKey
+                    and now - self._lastReadTime <= self._doublePressTimeout())
+        if isRepeat:
+            self._lastReadKey = None  # a third press starts a fresh read
+            self._lastReadTime = 0.0
+            self._replyToMessage(index)
+            return
+        self._lastReadKey = key
+        self._lastReadTime = now
+        self._readMessage(index)
+
+    # -----------------------------------------------------------------------
+    # Reply to a message (double press of a read hotkey)
+    # -----------------------------------------------------------------------
+
+    def _authorOf(self, row):
+        """Best-effort author name from a row, for the spoken confirmation.
+
+        A row's text is "author , text , time", so the part before the first
+        comma is the author. Only used for feedback - if the shape ever changes
+        the worst case is a less specific confirmation, never a wrong action.
+        """
+        text = self._objectText(row)
+        if not text:
+            return ""
+        return text.split(",", 1)[0].strip()
+
+    def _focusIsOn(self, target):
+        """True if the system focus is on `target`.
+
+        NVDA hands back a fresh NVDAObject per query, so `is` never matches;
+        NVDAObject defines __eq__ for exactly this. Role+name is a backstop for
+        the case where equality can't be established but it is plainly the same
+        node, because the alternative - sending a bare "r" to whatever does have
+        focus - would type a stray letter into the user's draft.
+        """
+        focus = self._safe(lambda: api.getFocusObject())
+        if focus is None or target is None:
+            return False
+        try:
+            if focus == target:
+                return True
+        except Exception:
+            pass
+        name = self._name(target)
+        return bool(name) and self._role(focus) == self._role(target) and self._name(focus) == name
+
+    @staticmethod
+    def _looksLikeReplyControl(name):
+        """True for Discord's Reply control, false for "Replying to ..." labels.
+
+        A message that is itself a reply carries text starting "Replying to", and
+        so does the composer bar. Matching those would click the wrong thing, so
+        require the word "reply" exactly or as the start of a phrase like
+        "Reply to Alice" - never the participle.
+        """
+        if not name:
+            return False
+        name = name.strip().lower()
+        if name.startswith("replying"):
+            return False
+        return name == REPLY_CONTROL_NAME or name.startswith("reply ")
+
+    def _findReplyControl(self, root, nodeCap, maxDepth):
+        """Bounded DFS for an actionable object named "Reply". None if absent."""
+        if root is None:
+            return None
+        stack = [(root, 0)]
+        visited = 0
+        while stack:
+            obj, depth = stack.pop()
+            visited += 1
+            if visited > nodeCap:
+                log.debug("Discord: reply-control search hit its node cap")
+                return None
+            if self._role(obj) in ACTION_ROLES and self._looksLikeReplyControl(self._name(obj)):
+                return obj
+            if depth < maxDepth:
+                for ch in self._iterChildren(obj):
+                    stack.append((ch, depth + 1))
+        return None
+
+    def _invoke(self, obj):
+        """Press an object via its accessible default action. True if accepted."""
+        try:
+            obj.doAction()
+            return True
+        except Exception:
+            log.debug("Discord: doAction failed on reply control", exc_info=True)
+            return False
+
+    def _replyToMessage(self, indexFromNewest):
+        listObj = self._findMessagesList()
+        if listObj is None:
+            ui.message("No messages here. Open a text channel or DM to reply.")
+            return
+        needed = indexFromNewest + 1
+        messages = self._collectRecentMessages(listObj, needed)
+        if len(messages) < needed:
+            if not messages:
+                self._cachedList = None
+                ui.message("Couldn't read the messages. Try again, or run the debug dump command.")
+            else:
+                ui.message("Only %d messages are loaded." % len(messages))
+            return
+        row = messages[indexFromNewest]
+        target = self._firstFocusable(row)
+        if target is None:
+            ui.message("Can't reply to that message; Discord is not offering it to the keyboard.")
+            return
+        author = self._authorOf(row)
+        # Moving focus is the point of this command, exactly as with Alt+D - and
+        # Discord only builds a message's action toolbar for the focused or
+        # hovered message, so this is also what puts the Reply button in the tree.
+        self._safe(lambda: target.setFocus())
+        core.callLater(REPLY_FOCUS_DELAY_MS, self._pressReplyControl, row, target, author)
+
+    def _pressReplyControl(self, row, target, author):
+        """Second half of the reply: find Discord's Reply control and press it."""
+        try:
+            if not self._focusIsOn(target):
+                ui.message("Couldn't select that message to reply to. Try again.")
+                return
+            # Cut the re-reading of the message we just spoke half a second ago.
+            self._safe(lambda: speech.cancelSpeech())
+            button = self._findReplyControl(row, REPLY_SUBTREE_NODE_CAP, REPLY_SUBTREE_MAX_DEPTH)
+            if button is not None and self._invoke(button):
+                core.callLater(REPLY_CONFIRM_DELAY_MS, self._confirmReply, author)
+                return
+            # No toolbar button: fall back to the message's context menu.
+            log.debug("Discord: no Reply button on the row; trying the context menu")
+            self._safe(lambda: KeyboardInputGesture.fromName("applications").send())
+            core.callLater(REPLY_MENU_DELAY_MS, self._pressReplyMenuItem, author)
+        except Exception:
+            log.debug("Discord: reply step failed", exc_info=True)
+            ui.message("Couldn't start a reply to that message.")
+
+    def _pressReplyMenuItem(self, author):
+        """Find "Reply" in the open context menu and press it.
+
+        If it isn't there, close the menu again. Leaving a blind user parked in an
+        open menu they did not ask for, with no announcement, is a worse outcome
+        than the reply simply not happening.
+        """
+        try:
+            menu = self._openMenuRoot()
+            item = self._findReplyControl(menu, REPLY_MENU_NODE_CAP, REPLY_MENU_MAX_DEPTH)
+            if item is not None and self._invoke(item):
+                core.callLater(REPLY_CONFIRM_DELAY_MS, self._confirmReply, author)
+                return
+            self._safe(lambda: KeyboardInputGesture.fromName("escape").send())
+            ui.message("Couldn't find Discord's reply command for that message.")
+        except Exception:
+            log.debug("Discord: reply menu step failed", exc_info=True)
+            self._safe(lambda: KeyboardInputGesture.fromName("escape").send())
+            ui.message("Couldn't start a reply to that message.")
+
+    def _openMenuRoot(self):
+        """Best root for searching the context menu Discord just opened.
+
+        Focus normally moves into the menu, so walking up from it finds the menu
+        container cheaply. If focus did not move, search the whole foreground -
+        the menu is somewhere in it, and the node cap keeps that affordable.
+        """
+        node = self._safe(lambda: api.getFocusObject())
+        steps = 0
+        while node is not None and steps < ANCHOR_WALK_CAP:
+            steps += 1
+            role = self._role(node)
+            if role == ROLE_POPUPMENU:
+                return node
+            node = self._safe(lambda n=node: n.parent)
+        return self._safe(lambda: api.getForegroundObject())
+
+    def _confirmReply(self, author):
+        """Say whether the reply composer actually opened.
+
+        Checked rather than assumed: if Discord ignores R the focus stays on the
+        message, and a blind user typing their reply would have no way to notice
+        that it was going nowhere.
+        """
+        try:
+            focus = self._safe(lambda: api.getFocusObject())
+            if focus is not None and self._role(focus) == ROLE_EDITABLETEXT:
+                ui.message(("Replying to %s" % author) if author else "Replying")
+            else:
+                ui.message("Discord did not open a reply for that message.")
+        except Exception:
+            log.debug("Discord: reply confirmation failed", exc_info=True)
 
     # -----------------------------------------------------------------------
     # Jump to the "New messages" marker (first unread)
@@ -758,6 +1034,32 @@ class AppModule(appModuleHandler.AppModule):
                                 % (self._role(node), self._name(node), snippet))
                         shown += 1
                         node = self._safe(lambda n=node: n.previous)
+                    f.write("\n")
+
+                # The focused object in detail. This is what tells us whether
+                # Discord has built a Reply control for the selected message:
+                # take a dump with a message focused (Alt+D, or a double press)
+                # and this section shows the row's toolbar, or its absence.
+                f.write("=== FOCUSED OBJECT ===\n")
+                focus = self._safe(lambda: api.getFocusObject())
+                if focus is None:
+                    f.write("  (no focus object)\n\n")
+                else:
+                    f.write("  focus: role=%r name=%r\n" % (self._role(focus), self._name(focus)))
+                    f.write("  ancestry (focus outward):\n")
+                    node = self._safe(lambda: focus.parent)
+                    hops = 0
+                    while node is not None and hops < ANCHOR_WALK_CAP:
+                        hops += 1
+                        f.write("    ^%d role=%r name=%r\n"
+                                % (hops, self._role(node), self._name(node)))
+                        node = self._safe(lambda n=node: n.parent)
+                    root = self._safe(lambda: focus.parent) or focus
+                    subtree = []
+                    self._collectTree(root, 0, subtree, [])
+                    f.write("  subtree around focus (%d nodes):\n" % len(subtree))
+                    for line in subtree[:REPLY_SUBTREE_NODE_CAP]:
+                        f.write("    %s\n" % line)
                     f.write("\n")
 
                 f.write("=== FULL TREE (role / name, depth-limited) ===\n")
