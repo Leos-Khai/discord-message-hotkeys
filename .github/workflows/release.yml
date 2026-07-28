@@ -17,11 +17,11 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -67,7 +67,7 @@ jobs:
       # Anyone can check it with: gh attestation verify <file> --repo <owner>/<repo>
       - name: Attest build provenance
         if: steps.check.outputs.needed == 'true'
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/${{ steps.checksum.outputs.file }}
 
@@ -105,7 +105,11 @@ jobs:
 
       - name: Publish the GitHub Release
         if: steps.check.outputs.needed == 'true'
-        uses: softprops/action-gh-release@v2
+        # Pinned to a commit, not a tag: this is the one third-party action here,
+        # and it holds a token that can write releases. A moving tag can be
+        # repointed at new code by whoever controls the repository; a commit
+        # cannot. Bump it deliberately, by hand.
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: v${{ steps.version.outputs.version }}
