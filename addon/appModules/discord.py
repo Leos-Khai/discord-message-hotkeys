@@ -5,6 +5,8 @@
 #   Alt+1 twice quickly -> reply to that message (same for Alt+2 .. Alt+0)
 #   Alt+D  -> move focus to the "New messages" marker (first unread message)
 #   Alt+Shift+N -> cycle auto-reading of new messages: off / polite / interrupt
+#   Ctrl+Shift+S -> move focus to the current server in the server list
+#   Ctrl+Shift+C -> move focus to the current channel (or first DM) in the channel list
 #   NVDA+Ctrl+Shift+F10 -> write a structure dump to the Downloads folder (debug)
 #
 # Named "discord.py" so NVDA auto-loads it for the "Discord.exe" process.
@@ -87,6 +89,9 @@ try:
     ROLE_ARTICLE = controlTypes.Role.ARTICLE
     ROLE_SEPARATOR = controlTypes.Role.SEPARATOR
     ROLE_LANDMARK = controlTypes.Role.LANDMARK
+    ROLE_GROUPING = controlTypes.Role.GROUPING
+    ROLE_TREEVIEW = controlTypes.Role.TREEVIEW
+    ROLE_TREEVIEWITEM = controlTypes.Role.TREEVIEWITEM
     ROLE_EDITABLETEXT = controlTypes.Role.EDITABLETEXT
     ROLE_BUTTON = controlTypes.Role.BUTTON
     ROLE_MENUITEM = controlTypes.Role.MENUITEM
@@ -98,6 +103,9 @@ except AttributeError:
     ROLE_ARTICLE = controlTypes.ROLE_ARTICLE
     ROLE_SEPARATOR = controlTypes.ROLE_SEPARATOR
     ROLE_LANDMARK = controlTypes.ROLE_LANDMARK
+    ROLE_GROUPING = controlTypes.ROLE_GROUPING
+    ROLE_TREEVIEW = controlTypes.ROLE_TREEVIEW
+    ROLE_TREEVIEWITEM = controlTypes.ROLE_TREEVIEWITEM
     ROLE_EDITABLETEXT = controlTypes.ROLE_EDITABLETEXT
     ROLE_BUTTON = controlTypes.ROLE_BUTTON
     ROLE_MENUITEM = controlTypes.ROLE_MENUITEM
@@ -105,6 +113,12 @@ except AttributeError:
     STATE_FOCUSABLE = controlTypes.STATE_FOCUSABLE
 
 MESSAGE_ROLES = {ROLE_LISTITEM, ROLE_ARTICLE}
+# The child of a row that carries the whole message as its name. The old
+# Electron client used an ARTICLE; the Rust "Phoenix" client uses a GROUPING
+# (dump of 2026-11-08: LISTITEM > [SEPARATOR date], GROUPING "author , text , time").
+MESSAGE_BODY_ROLES = {ROLE_ARTICLE, ROLE_GROUPING}
+# The "(channel)" wrapper: a LANDMARK in the old client, a GROUPING in Phoenix.
+CHANNEL_ANCHOR_ROLES = {ROLE_LANDMARK, ROLE_GROUPING}
 # Roles a "Reply" control could plausibly have. Kept wide: Discord builds its
 # menus and toolbars in HTML, so the exact role is Discord's choice, not a
 # platform guarantee.
@@ -328,7 +342,7 @@ class AppModule(appModuleHandler.AppModule):
         steps = 0
         while node is not None and steps < ANCHOR_WALK_CAP:
             steps += 1
-            if self._role(node) == ROLE_LANDMARK:
+            if self._role(node) in CHANNEL_ANCHOR_ROLES:
                 name = (self._name(node) or "").strip().lower()
                 if name.endswith(CHANNEL_LANDMARK_SUFFIX):
                     return node
@@ -438,14 +452,15 @@ class AppModule(appModuleHandler.AppModule):
     _PLACEHOLDER_CHARS = "￼﻿"
 
     def _findChildArticle(self, obj):
-        """Return obj's child ARTICLE (the message body), if any.
+        """Return obj's message-body child (ARTICLE or GROUPING), if any.
 
-        A Discord message row is a LISTITEM whose single child is an ARTICLE
-        whose accessible NAME is the whole message ("author , text , time").
-        One cheap firstChild/next walk - no bulk fetch.
+        A Discord message row is a LISTITEM whose body child's accessible NAME
+        is the whole message ("author , text , time"). In Phoenix a date divider
+        may come first, so skip non-body children. One cheap firstChild/next
+        walk - no bulk fetch.
         """
         for ch in self._iterChildren(obj):
-            if self._role(ch) == ROLE_ARTICLE:
+            if self._role(ch) in MESSAGE_BODY_ROLES:
                 return ch
         return None
 
@@ -453,7 +468,7 @@ class AppModule(appModuleHandler.AppModule):
         # The row itself (a LISTITEM) has no useful text: makeTextInfo returns
         # only U+FFFC placeholders standing in for its child ARTICLE. Read the
         # ARTICLE, whose accessible name carries the full message.
-        if self._role(obj) != ROLE_ARTICLE:
+        if self._role(obj) not in MESSAGE_BODY_ROLES:
             article = self._findChildArticle(obj)
             if article is not None:
                 obj = article
@@ -557,7 +572,8 @@ class AppModule(appModuleHandler.AppModule):
         text = self._objectText(row)
         if not text:
             return ""
-        return text.split(",", 1)[0].strip()
+        # Phoenix prefixes replies: "Zack replying to UnboundDara , text , time".
+        return text.split(",", 1)[0].split(" replying to ", 1)[0].strip()
 
     def _focusIsOn(self, target):
         """True if the system focus is on `target`.
@@ -783,6 +799,13 @@ class AppModule(appModuleHandler.AppModule):
             if role in MESSAGE_ROLES:
                 count += 1
                 firstUnread = node
+                # Phoenix nests the divider inside the row as its first child,
+                # so a row that opens with the marker is itself the first unread.
+                if role == ROLE_LISTITEM:
+                    first = self._safe(lambda n=node: n.firstChild)
+                    if first is not None and self._isNewMarker(first):
+                        marker = first
+                        break
             node = self._safe(lambda n=node: n.previous)
 
         if marker is None:
@@ -815,6 +838,140 @@ class AppModule(appModuleHandler.AppModule):
             label = "%d new messages" % count
         text = self._objectText(firstUnread)
         ui.message("%s. First: %s" % (label, text) if text else label)
+
+    # -----------------------------------------------------------------------
+    # Jump to the server list / channel list
+    # -----------------------------------------------------------------------
+    #
+    # Phoenix layout (dumps of 2026-11-08), all within a few levels of the window:
+    #   GROUPING "Servers sidebar" > TREEVIEW > TREEVIEWITEM "Direct Messages",
+    #       GROUPING "Servers" > TREEVIEWITEM "1 mention, A.K.I." ...
+    #   GROUPING "<server> (server)" > LIST "Channels" > LISTITEM > LINK
+    #       "sf6-links (text channel), Private Channel (locked)"
+    #   GROUPING "Private channels" > LIST "Direct Messages" > LISTITEM > LINK
+    #       "Orion (direct message), Idle" (after Friends / Nitro / Shop links)
+    # The dumps carry no selected state, so "current" comes from the window
+    # title: "#sf6-links | The World of Mischief - Discord".
+
+    SIDEBAR_SEARCH_DEPTH = 4
+    SIDEBAR_SEARCH_NODE_CAP = 600
+    DM_LINK_MARKERS = ("(direct message)", "(group message)")
+
+    def _titleParts(self):
+        """(place, server) from the window title; server is "" outside a server."""
+        title = self._name(self._safe(lambda: api.getForegroundObject())) or ""
+        if title.endswith(" - Discord"):
+            title = title[:-len(" - Discord")]
+        place, _, server = title.partition(" | ")
+        return place.strip().lstrip("#@").strip(), server.strip()
+
+    @staticmethod
+    def _nameMatches(name, target):
+        """True if an item's name refers to `target`.
+
+        Discord decorates names with comma-separated extras on either side
+        ("1 mention, A.K.I.", "sf6-links (text channel), Private Channel").
+        """
+        if not name or not target:
+            return False
+        if name == target or name.startswith(target + ",") or name.startswith(target + " ("):
+            return True
+        return any(part == target or part.startswith(target + " (")
+                   for part in name.split(", "))
+
+    def _findInWindow(self, match):
+        """Shallow bounded DFS from the foreground for the first obj where match(obj, role)."""
+        root = self._safe(lambda: api.getForegroundObject())
+        stack = [(root, 0)] if root is not None else []
+        visited = 0
+        while stack and visited < self.SIDEBAR_SEARCH_NODE_CAP:
+            obj, depth = stack.pop()
+            visited += 1
+            role = self._role(obj)
+            if match(obj, role):
+                return obj
+            # Lists and trees are targets, never containers of one: skip their rows.
+            if depth < self.SIDEBAR_SEARCH_DEPTH and role not in (ROLE_LIST, ROLE_TREEVIEW):
+                for ch in self._iterChildren(obj):
+                    stack.append((ch, depth + 1))
+        return None
+
+    def _treeItems(self, node, depth=0):
+        """Yield server-tree items in order, looking inside groupings and folders."""
+        for ch in self._iterChildren(node):
+            role = self._role(ch)
+            if role == ROLE_TREEVIEWITEM:
+                yield ch
+                if depth < 2 and "folder" in (self._name(ch) or "").lower():
+                    for item in self._treeItems(ch, depth + 1):
+                        yield item
+            elif role == ROLE_GROUPING and depth < 2:
+                for item in self._treeItems(ch, depth + 1):
+                    yield item
+
+    def _listLinks(self, listObj):
+        """Yield the first child (the channel/DM link or button) of each LISTITEM."""
+        for row in self._iterChildren(listObj):
+            if self._role(row) == ROLE_LISTITEM:
+                child = self._safe(lambda r=row: r.firstChild)
+                if child is not None:
+                    yield child
+
+    def _moveFocusTo(self, obj):
+        states = self._safe(lambda: obj.states)
+        if states and STATE_FOCUSABLE in states:
+            self._safe(lambda: obj.setFocus())
+            return
+        # Not focusable: at least put the review cursor there and say where.
+        self._safe(lambda: api.setNavigatorObject(obj))
+        ui.message(self._name(obj) or "")
+
+    @script(
+        description="Move focus to the current server in Discord's server list",
+        gesture="kb:control+shift+s",
+    )
+    def script_jumpToServerList(self, gesture):
+        tree = self._findInWindow(lambda o, r: r == ROLE_TREEVIEW)
+        if tree is None:
+            ui.message("Couldn't find the server list.")
+            return
+        _, server = self._titleParts()
+        first = None
+        for item in self._treeItems(tree):
+            if first is None:
+                first = item  # "Direct Messages": the Home/Friends/DM position
+            if server and self._nameMatches(self._name(item), server):
+                self._moveFocusTo(item)
+                return
+        if first is None:
+            ui.message("The server list is empty.")
+            return
+        self._moveFocusTo(first)
+
+    @script(
+        description="Move focus to the current channel in Discord's channel list, or the first direct message",
+        gesture="kb:control+shift+c",
+    )
+    def script_jumpToChannelList(self, gesture):
+        listObj = self._findInWindow(
+            lambda o, r: r == ROLE_LIST and self._name(o) in ("Channels", "Direct Messages"))
+        if listObj is None:
+            ui.message("Couldn't find the channel list.")
+            return
+        isDMs = self._name(listObj) == "Direct Messages"
+        place, _ = self._titleParts()
+        first = None
+        for link in self._listLinks(listObj):
+            name = self._name(link) or ""
+            if first is None and (not isDMs or any(m in name for m in self.DM_LINK_MARKERS)):
+                first = link
+            if self._nameMatches(name, place):
+                self._moveFocusTo(link)
+                return
+        if first is None:
+            ui.message("No direct messages." if isDMs else "The channel list is empty.")
+            return
+        self._moveFocusTo(first)
 
     # -----------------------------------------------------------------------
     # Auto-read incoming messages (event driven; opt-in via Alt+Shift+N)

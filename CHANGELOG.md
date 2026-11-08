@@ -11,6 +11,22 @@ the same commit that bumps the version.
 
 ## [Unreleased]
 
+### Added
+
+- **Ctrl+Shift+S jumps to the server list,** landing on the server you are in, or
+  on Direct Messages from the Friends page or a DM.
+- **Ctrl+Shift+C jumps to the channel list,** landing on the channel you are in.
+  Outside a server it goes to the direct messages list: the open conversation,
+  or the first direct message from the Friends page.
+
+### Fixed
+
+- **Works with Discord's new Rust "Phoenix" client.** The new client wraps the
+  conversation in a grouping rather than a landmark, puts each message's text on
+  a grouping rather than an article, and places date and "New messages" dividers
+  inside the message row. The hotkeys, Alt+D and auto-read now recognise both
+  the old and the new layout.
+
 ## [0.9.0] - 2026-07-28
 
 ### Added
