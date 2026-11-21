@@ -13,6 +13,15 @@ the same commit that bumps the version.
 
 ### Added
 
+- **Browse mode in the new Rust "Phoenix" client.** Phoenix is not a web page,
+  so NVDA gave it no browse mode at all. The add-on now builds one from the
+  client's accessibility tree: arrow through messages (one line each: author,
+  text, time), use quick navigation keys (H, K, B, F, E, L, I, S, and D for the
+  server list, channel list, conversation and user area), NVDA+F7, find, and
+  Enter to open DMs, links, servers and tabs. It keeps up with Discord while you
+  read, without moving you off the message you are on. NVDA+F5 refreshes it,
+  Alt+V reads the message at the browse mode cursor, and it can be turned off
+  in the add-on's settings.
 - **Alt+V opens the focused message in a read-only window,** where you can read
   it by line, word or character. Escape closes it.
 - **Ctrl+Shift+Z jumps to the message box** in the open channel or DM, or to the

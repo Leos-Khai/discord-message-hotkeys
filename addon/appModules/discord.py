@@ -50,6 +50,14 @@ try:
 except Exception:  # pragma: no cover - very old/very new NVDA
     Spri = None
 
+# Browse mode for the Rust "Phoenix" client. Guarded: if it can't load on some
+# NVDA version, the hotkeys must keep working without it.
+try:
+    from . import _phoenixBrowseMode
+except Exception:  # pragma: no cover
+    log.error("Discord: Phoenix browse mode unavailable", exc_info=True)
+    _phoenixBrowseMode = None
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -202,8 +210,11 @@ AUTO_MODE_NAMES = {
 # panel (globalPlugins/discordMessageHotkeys) and the hotkey share this key.
 CONFIG_SECTION = "discordMessageHotkeys"
 CONFIG_KEY_MODE = "autoReadMode"
+# Browse mode in the Phoenix client (see _phoenixBrowseMode.py).
+CONFIG_KEY_BROWSE_MODE = "phoenixBrowseMode"
 config.conf.spec[CONFIG_SECTION] = {
     CONFIG_KEY_MODE: "integer(default=0, min=0, max=2)",
+    CONFIG_KEY_BROWSE_MODE: "boolean(default=True)",
 }
 
 # How many recently-announced messages to remember, to avoid re-reading a
@@ -288,6 +299,13 @@ class AppModule(appModuleHandler.AppModule):
             pass
         self._pollTimer = None
         super(AppModule, self).terminate(*args, **kwargs)
+
+    def chooseNVDAObjectOverlayClasses(self, obj, clsList):
+        # The Phoenix main window becomes the root of a browse mode document.
+        # Runs for every object Discord creates, so the test is a few cheap
+        # attribute reads; the Electron client never matches it.
+        if _phoenixBrowseMode is not None and _phoenixBrowseMode.isPhoenixRoot(obj):
+            clsList.insert(0, _phoenixBrowseMode.PhoenixWindow)
 
     # -----------------------------------------------------------------------
     # Small safe helpers (single COM calls, with a light retry)
@@ -849,9 +867,19 @@ class AppModule(appModuleHandler.AppModule):
     # Review the focused message in a read-only window
     # -----------------------------------------------------------------------
 
+    def _browseModeCaretObject(self):
+        """The object at the Phoenix browse mode caret, or None outside browse mode."""
+        if _phoenixBrowseMode is None:
+            return None
+        focus = self._safe(lambda: api.getFocusObject())
+        ti = getattr(focus, "treeInterceptor", None) if focus is not None else None
+        if isinstance(ti, _phoenixBrowseMode.PhoenixBrowseDocument) and not ti.passThrough:
+            return self._safe(ti.getCaretObject)
+        return None
+
     def _focusedMessageRow(self):
-        """The message row containing the focus, or None if focus isn't on a message."""
-        node = self._safe(lambda: api.getFocusObject())
+        """The message row at the browse mode caret or the focus, or None if not on a message."""
+        node = self._browseModeCaretObject() or self._safe(lambda: api.getFocusObject())
         child = None
         steps = 0
         while node is not None and steps < ANCHOR_WALK_CAP:
@@ -1512,6 +1540,8 @@ class AppModule(appModuleHandler.AppModule):
                         f.write("    %s\n" % line)
                     f.write("\n")
 
+                self._dumpBrowseDocument(f)
+
                 f.write("=== FULL TREE (role / name, depth-limited) ===\n")
                 f.write("\n".join(lines))
                 f.write("\n")
@@ -1520,6 +1550,31 @@ class AppModule(appModuleHandler.AppModule):
         except Exception as e:
             log.error("Discord dump failed", exc_info=True)
             ui.message("Could not save the dump: %s" % e)
+
+    BROWSE_DUMP_LINE_CAP = 400
+
+    def _dumpBrowseDocument(self, f):
+        """The Phoenix browse mode document as rendered: each line and its fields."""
+        if _phoenixBrowseMode is None:
+            return
+        focus = self._safe(lambda: api.getFocusObject())
+        ti = getattr(focus, "treeInterceptor", None) if focus is not None else None
+        if not isinstance(ti, _phoenixBrowseMode.PhoenixBrowseDocument):
+            return
+        buf = ti._buffer
+        f.write("=== PHOENIX BROWSE MODE DOCUMENT ===\n")
+        if buf is None:
+            f.write("  (not loaded)\n\n")
+            return
+        f.write("  passThrough=%r  lines=%d  chars=%d  caret=%r\n"
+                % (ti.passThrough, len(buf.lineStarts), len(buf.text), ti._selectionOffsets))
+        for i, start in enumerate(buf.lineStarts[:self.BROWSE_DUMP_LINE_CAP]):
+            end = buf.lineStarts[i + 1] if i + 1 < len(buf.lineStarts) else len(buf.text)
+            fields = " > ".join(
+                n.role + ("[%s]" % n.landmark if n.landmark else "")
+                for n in buf.fieldChain(start))
+            f.write("  %4d %r  | %s\n" % (i, buf.text[start:end].rstrip("\n"), fields))
+        f.write("\n")
 
     def _collectTree(self, obj, depth, lines, lists):
         if obj is None or len(lines) > SEARCH_NODE_CAP:
