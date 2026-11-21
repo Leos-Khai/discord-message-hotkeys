@@ -5,8 +5,12 @@
 #   Alt+1 twice quickly -> reply to that message (same for Alt+2 .. Alt+0)
 #   Alt+D  -> move focus to the "New messages" marker (first unread message)
 #   Alt+Shift+N -> cycle auto-reading of new messages: off / polite / interrupt
+#   Alt+V  -> open the focused message in a read-only window to review it
 #   Ctrl+Shift+S -> move focus to the current server in the server list
 #   Ctrl+Shift+C -> move focus to the current channel (or first DM) in the channel list
+#   Ctrl+Shift+A -> move focus to the first person in Active Now (Friends page)
+#   Ctrl+Shift+Z -> move focus to the message box, or the first friend on the Friends page
+#   Ctrl+Shift+X -> move focus to the user status and settings area (bottom left)
 #   NVDA+Ctrl+Shift+F10 -> write a structure dump to the Downloads folder (debug)
 #
 # Named "discord.py" so NVDA auto-loads it for the "Discord.exe" process.
@@ -20,6 +24,7 @@
 #   single navigation calls (lastChild / previous), which are cheap and safe,
 #   and only fetches as many as the pressed key needs (Alt+1 = 1 row).
 
+import html
 import os
 import time
 from collections import deque
@@ -55,30 +60,15 @@ MAX_MESSAGES = 10
 # Confirmed from a live dump: "Messages in sf6-links".
 MESSAGES_LIST_NAME_PREFIX = "messages"
 
-# Safety caps so nothing can freeze NVDA.
-SEARCH_NODE_CAP = 15000     # max objects visited while locating the list
-SEARCH_MAX_DEPTH = 45       # max descent depth while locating the list
+# Caps for the debug dump's whole-tree walk.
+SEARCH_NODE_CAP = 15000
+SEARCH_MAX_DEPTH = 45
 
-# Wall-clock budget for one list search. Split by who asked, because the two
-# callers have opposite needs:
-#   INTERACTIVE - the user pressed Alt+1. They are waiting on purpose and would
-#       far rather wait a beat than be told "No messages here" in an open DM.
-#       0.6s was too tight: a cold search is ~500 COM round-trips, and against a
-#       busy Chromium renderer those cost 1-5ms each, so the search intermittently
-#       blew the budget and reported an empty channel. That was the DM flakiness.
-#   BACKGROUND - the auto-read poller. Must stay tight; it runs unattended.
-SEARCH_BUDGET_INTERACTIVE = 2.0
-SEARCH_BUDGET_BACKGROUND = 0.6
-#   NO_ANCHOR - no "(channel)" landmark around the focus. That is already a
-#       confident "not in a conversation", so the whole-window fallback exists
-#       only to survive a Discord markup change and must not make the everyday
-#       Friends/Home/Settings case wait. Kept well under the old 0.6s, because
-#       here we expect to find nothing and are just confirming it.
-SEARCH_BUDGET_NO_ANCHOR = 0.35
-#   The budget is a backstop, not the main anti-lag guard any more - see
-#   _channelAnchor(). On a non-channel screen (Friends, Home, Settings) there is
-#   no channel landmark in the focus ancestry, so the search now bails in a
-#   handful of COM calls instead of walking the whole tree (the old ~5s hang).
+# Locating the list needs no wall-clock budget any more: it is a shallow walk to
+# the "(channel)" grouping (window > pane > grouping in Phoenix), never into the
+# sidebars' lists and trees. See _searchMessagesList.
+CHANNEL_SEARCH_DEPTH = 3    # window > pane > grouping, plus one level of slack
+LIST_SEARCH_DEPTH = 4       # from the grouping down to the list (a direct child in Phoenix)
 SIBLING_WALK_CAP = 250      # max rows to step through when collecting messages
 CHILD_ITER_CAP = 600        # max children to iterate for any one node
 
@@ -92,6 +82,11 @@ try:
     ROLE_GROUPING = controlTypes.Role.GROUPING
     ROLE_TREEVIEW = controlTypes.Role.TREEVIEW
     ROLE_TREEVIEWITEM = controlTypes.Role.TREEVIEWITEM
+    ROLE_PANE = controlTypes.Role.PANE
+    ROLE_WINDOW = controlTypes.Role.WINDOW
+    ROLE_STATICTEXT = controlTypes.Role.STATICTEXT
+    ROLE_LINK = controlTypes.Role.LINK
+    ROLE_TOGGLEBUTTON = controlTypes.Role.TOGGLEBUTTON
     ROLE_EDITABLETEXT = controlTypes.Role.EDITABLETEXT
     ROLE_BUTTON = controlTypes.Role.BUTTON
     ROLE_MENUITEM = controlTypes.Role.MENUITEM
@@ -106,6 +101,11 @@ except AttributeError:
     ROLE_GROUPING = controlTypes.ROLE_GROUPING
     ROLE_TREEVIEW = controlTypes.ROLE_TREEVIEW
     ROLE_TREEVIEWITEM = controlTypes.ROLE_TREEVIEWITEM
+    ROLE_PANE = controlTypes.ROLE_PANE
+    ROLE_WINDOW = controlTypes.ROLE_WINDOW
+    ROLE_STATICTEXT = controlTypes.ROLE_STATICTEXT
+    ROLE_LINK = controlTypes.ROLE_LINK
+    ROLE_TOGGLEBUTTON = controlTypes.ROLE_TOGGLEBUTTON
     ROLE_EDITABLETEXT = controlTypes.ROLE_EDITABLETEXT
     ROLE_BUTTON = controlTypes.ROLE_BUTTON
     ROLE_MENUITEM = controlTypes.ROLE_MENUITEM
@@ -229,6 +229,24 @@ IDLE_POLL_INTERVAL_MS = 5000
 SEARCH_THROTTLE_SEC = 3.0
 
 
+try:
+    from exceptions import CallCancelled  # NVDA's watchdog cancelling a stuck COM call
+except Exception:  # pragma: no cover
+    CallCancelled = None
+try:
+    from comtypes import COMError
+except Exception:  # pragma: no cover
+    COMError = None
+# RPC_E_CALL_CANCELED (0x8001011F) and RPC_E_SERVERCALL_RETRYLATER (0x8001010A).
+TRANSIENT_HRESULTS = {-2147417825, -2147417846}
+
+
+def _isTransient(e):
+    if CallCancelled is not None and isinstance(e, CallCancelled):
+        return True
+    return COMError is not None and isinstance(e, COMError) and e.hresult in TRANSIENT_HRESULTS
+
+
 def getAutoReadMode():
     try:
         return int(config.conf[CONFIG_SECTION][CONFIG_KEY_MODE])
@@ -277,13 +295,19 @@ class AppModule(appModuleHandler.AppModule):
 
     @staticmethod
     def _safe(func, retries=2):
-        """Call func(), tolerating transient COM errors like CallCancelled."""
+        """Call func(), retrying only transient errors (a cancelled or busy COM call).
+
+        Anything else - a dead object, an unsupported property - fails the same
+        way every time, so it returns None at once instead of sleeping 40ms.
+        """
         for attempt in range(retries + 1):
             try:
                 return func()
-            except Exception:
-                if attempt < retries:
+            except Exception as e:
+                if attempt < retries and _isTransient(e):
                     time.sleep(0.02)
+                else:
+                    return None
         return None
 
     def _role(self, obj):
@@ -309,20 +333,29 @@ class AppModule(appModuleHandler.AppModule):
     # Locate the messages list (cached + bounded)
     # -----------------------------------------------------------------------
 
-    def _listStillValid(self, obj):
+    def _listStillValid(self, obj, role=None):
         if obj is None:
             return False
+        if role is None:
+            role = self._role(obj)
+        if role != ROLE_LIST:  # role first: most callers reject on it alone
+            return False
         name = self._name(obj)
-        return (
-            self._role(obj) == ROLE_LIST
-            and name
-            and name.lower().startswith(MESSAGES_LIST_NAME_PREFIX)
-        )
+        return bool(name) and name.lower().startswith(MESSAGES_LIST_NAME_PREFIX)
 
-    def _findMessagesList(self, budget=SEARCH_BUDGET_INTERACTIVE):
+    def _isChannelAnchor(self, obj, role):
+        if role not in CHANNEL_ANCHOR_ROLES:
+            return False
+        name = (self._name(obj) or "").strip().lower()
+        # "Members list for spam (channel)" sits beside the conversation and also ends
+        # in "(channel)"; a voice channel's chat is "Text chat for voice channel X".
+        return ((name.endswith(CHANNEL_LANDMARK_SUFFIX) and not name.startswith("members list for"))
+                or name.startswith("text chat for voice channel"))
+
+    def _findMessagesList(self):
         if self._listStillValid(self._cachedList):
             return self._cachedList
-        self._cachedList = self._searchMessagesList(budget)
+        self._cachedList = self._searchMessagesList()
         return self._cachedList
 
     def _channelAnchor(self):
@@ -342,54 +375,27 @@ class AppModule(appModuleHandler.AppModule):
         steps = 0
         while node is not None and steps < ANCHOR_WALK_CAP:
             steps += 1
-            if self._role(node) in CHANNEL_ANCHOR_ROLES:
-                name = (self._name(node) or "").strip().lower()
-                if name.endswith(CHANNEL_LANDMARK_SUFFIX):
-                    return node
+            if self._isChannelAnchor(node, self._role(node)):
+                return node
             node = self._safe(lambda n=node: n.parent)
         return None
 
-    def _searchMessagesList(self, budget=SEARCH_BUDGET_INTERACTIVE):
-        """Bounded depth-first search for the messages LIST (no bulk fetches).
+    def _searchMessagesList(self):
+        """Find the messages LIST under the "<name> (channel)" grouping.
 
-        Starts from the channel landmark when one is reachable from the focus,
-        and only falls back to the whole foreground tree if it is not - so a
-        Discord markup change degrades to the old behaviour instead of breaking.
-
-        That fallback must stay on a short leash. Missing anchor is the normal
-        state on the Friends/Home/Settings screens, so charging it the full
-        interactive budget made the "not in a channel" warning slower than it had
-        ever been - the opposite of what the anchor is for.
+        The grouping comes from the focus ancestry when focus is in the
+        conversation (cheapest), else from a shallow window search - the case
+        after Ctrl+Shift+S / Ctrl+Shift+C, when focus is in a sidebar. Neither
+        walk descends into lists or trees, so the sidebars' hundreds of rows are
+        never visited: a few dozen COM calls, no wall-clock budget needed. On a
+        screen with no channel (Friends, Settings) it returns None just as fast.
         """
-        root = self._channelAnchor()
-        if root is None:
-            root = self._safe(lambda: api.getForegroundObject())
-            budget = min(budget, SEARCH_BUDGET_NO_ANCHOR)
-        if root is None:
+        anchor = self._channelAnchor() or self._findInWindow(
+            self._isChannelAnchor, maxDepth=CHANNEL_SEARCH_DEPTH)
+        if anchor is None:
             return None
-        deadline = time.time() + budget
-        stack = [(root, 0)]
-        visited = 0
-        while stack:
-            obj, depth = stack.pop()
-            visited += 1
-            if visited > SEARCH_NODE_CAP:
-                log.debug("Discord: search hit node cap without finding the list")
-                return None
-            # Wall-clock guard: on a non-channel screen there is no messages
-            # list, so bail fast instead of walking the whole tree (the ~5s lag).
-            if time.time() > deadline:
-                log.debug("Discord: search exceeded time budget without finding the list")
-                return None
-            role = self._role(obj)
-            if role == ROLE_LIST:
-                name = self._name(obj)
-                if name and name.lower().startswith(MESSAGES_LIST_NAME_PREFIX):
-                    return obj
-            if depth < SEARCH_MAX_DEPTH:
-                for ch in self._iterChildren(obj):
-                    stack.append((ch, depth + 1))
-        return None
+        return self._findInWindow(
+            lambda o, r: self._listStillValid(o, r), root=anchor, maxDepth=LIST_SEARCH_DEPTH)
 
     # -----------------------------------------------------------------------
     # Collect recent messages WITHOUT a bulk children fetch
@@ -496,7 +502,7 @@ class AppModule(appModuleHandler.AppModule):
     def _readMessage(self, indexFromNewest):
         listObj = self._findMessagesList()
         if listObj is None:
-            ui.message("No messages here. Open a text channel or DM to read messages.")
+            self._noMessagesHere("No messages here. Open a text channel or DM to read messages.")
             return
         needed = indexFromNewest + 1
         messages = self._collectRecentMessages(listObj, needed)
@@ -642,7 +648,7 @@ class AppModule(appModuleHandler.AppModule):
     def _replyToMessage(self, indexFromNewest):
         listObj = self._findMessagesList()
         if listObj is None:
-            ui.message("No messages here. Open a text channel or DM to reply.")
+            self._noMessagesHere("No messages here. Open a text channel or DM to reply.")
             return
         needed = indexFromNewest + 1
         messages = self._collectRecentMessages(listObj, needed)
@@ -780,7 +786,7 @@ class AppModule(appModuleHandler.AppModule):
     def script_jumpToNewMessages(self, gesture):
         listObj = self._findMessagesList()
         if listObj is None:
-            ui.message("No messages here. Open a text channel or DM, then try again.")
+            self._noMessagesHere("No messages here. Open a text channel or DM, then try again.")
             return
         # Walk newest-first (lastChild/previous, single cheap nav calls). The
         # unread messages come before the "new" marker; the last message row we
@@ -840,6 +846,168 @@ class AppModule(appModuleHandler.AppModule):
         ui.message("%s. First: %s" % (label, text) if text else label)
 
     # -----------------------------------------------------------------------
+    # Review the focused message in a read-only window
+    # -----------------------------------------------------------------------
+
+    def _focusedMessageRow(self):
+        """The message row containing the focus, or None if focus isn't on a message."""
+        node = self._safe(lambda: api.getFocusObject())
+        child = None
+        steps = 0
+        while node is not None and steps < ANCHOR_WALK_CAP:
+            steps += 1
+            if self._listStillValid(node):
+                return child  # the list's direct child = the row
+            child = node
+            node = self._safe(lambda n=node: n.parent)
+        return None
+
+    # Controls on a message that are actions, not content.
+    VIEW_SKIP_NAMES = {"remove all embeds", "add reaction", "jump to reply",
+                       "play", "open link", "wave to say hi!", "previous", "next"}
+    # Toolbar Phoenix adds to the focused message (react / Reply / Forward / More).
+    MESSAGE_ACTIONS_NAME = "message actions"
+    VIEW_EMBED_NODE_CAP = 150
+
+    def _messageParts(self, row):
+        """Split a Phoenix message row into its parts, from its child objects.
+
+        Body (GROUPING) children, per the 2026-11-08 dumps:
+          BUTTON "Jump To Reply", BUTTON "@User", BUTTON "<quoted text>"  (replies)
+          STATICTEXT header > BUTTON author, ..., STATICTEXT full date
+          GROUPING "<message text, with line breaks>"
+          GROUPING "" > LINK / BUTTON / STATICTEXT "" (one per line)     (embeds)
+          BUTTON "Previous", BUTTON "Next"                     (paged embeds)
+          GROUPING "Message Actions" > ...           (only on the focused row)
+          TOGGLEBUTTON "thumbsup, 1 reaction, press to react"
+          STATICTEXT "Edited Yesterday at 1:11 pm"
+        """
+        body = self._findChildArticle(row) or row
+        p = {"author": "", "date": "", "reply": [], "text": "", "embed": [],
+             "links": [], "attachments": [], "reactions": [], "notes": []}
+        inReply = False
+        for ch in self._iterChildren(body):
+            role = self._role(ch)
+            name = (self._name(ch) or "").strip()
+            if role == ROLE_STATICTEXT:
+                kids = list(self._iterChildren(ch))
+                if kids and not p["author"] and self._role(kids[0]) == ROLE_BUTTON:
+                    p["author"] = (self._name(kids[0]) or "").strip()
+                    dates = [n for n in (self._name(k) for k in kids[1:]
+                                         if self._role(k) == ROLE_STATICTEXT) if n]
+                    p["date"] = dates[-1].strip() if dates else ""
+                    inReply = False  # the header ends the reply context
+                elif name and name.lower() not in self.VIEW_SKIP_NAMES:
+                    p["notes"].append(name)
+            elif role == ROLE_GROUPING:
+                if name.lower() == self.MESSAGE_ACTIONS_NAME:
+                    continue
+                if name and not p["text"]:
+                    p["text"] = name
+                else:
+                    self._collectEmbed(ch, p)
+            elif role == ROLE_TOGGLEBUTTON:
+                p["reactions"].append(name.replace(", press to react", ""))
+            elif role == ROLE_BUTTON:
+                if name.lower() == "jump to reply":
+                    inReply = True
+                elif inReply:
+                    if name and not name.startswith("Server Tag:"):
+                        p["reply"].append(name)
+                elif name and name.lower() not in self.VIEW_SKIP_NAMES:
+                    p["attachments"].append(name)
+        # Continuation and system messages have no header: fall back to the
+        # row's own name, "author , text , time".
+        fields = (self._name(body) or "").split(" , ")
+        if len(fields) >= 3:
+            p["author"] = p["author"] or fields[0].split(" replying to ")[0].strip()
+            p["date"] = p["date"] or fields[-1].strip()
+            if not p["text"] and not p["embed"]:
+                # shortcut: one run-on line when Discord exposes the embed's
+                # lines only through this summary; upgrade if a dump shows them.
+                p["text"] = " , ".join(fields[1:-1]).strip()
+        elif not p["text"] and not p["embed"]:
+            p["text"] = self._objectText(row)
+        p["attachments"] = [a for a in p["attachments"] if a not in p["links"]]
+        return p
+
+    def _collectEmbed(self, root, p):
+        """Gather link and button names from an embed grouping (bounded DFS)."""
+        stack = [(root, 0)]
+        visited = 0
+        while stack and visited < self.VIEW_EMBED_NODE_CAP:
+            obj, depth = stack.pop()
+            visited += 1
+            role = self._role(obj)
+            name = (self._name(obj) or "").strip()
+            if obj is not root and role == ROLE_LINK:
+                if name and name not in p["links"]:
+                    p["links"].append(name)
+                continue
+            if obj is not root and role == ROLE_BUTTON:
+                if name and name.lower() not in self.VIEW_SKIP_NAMES and name not in p["attachments"]:
+                    p["attachments"].append(name)
+                continue
+            if obj is not root and role == ROLE_STATICTEXT:
+                # Embed lines have empty names; their text may be in value or text content.
+                line = self._lineText(obj)
+                if line:
+                    p["embed"].append(line)
+                continue
+            if depth < 3:
+                # Reversed so the stack pops children in document order.
+                for ch in reversed(list(self._iterChildren(obj))):
+                    stack.append((ch, depth + 1))
+
+    def _lineText(self, obj):
+        """Text of a text object: its name, else its value, else its text content."""
+        return ((self._name(obj) or "").strip()
+                or (self._safe(lambda: obj.value) or "").strip()
+                or self._objectText(obj))
+
+    @staticmethod
+    def _messageHtml(p):
+        e = html.escape
+        out = []
+        if p["author"]:
+            out.append("<h1>%s</h1>" % e(p["author"]))
+        if p["date"]:
+            out.append("<p>%s</p>" % e(p["date"]))
+        if p["reply"]:
+            out.append("<p>Replying to %s</p>" % e(": ".join(p["reply"])))
+        for para in p["text"].split("\n\n"):
+            if para.strip():
+                out.append("<p>%s</p>" % e(para.strip()).replace("\n", "<br>"))
+        if p["embed"]:
+            out.append("<h2>Embed</h2><p>%s</p>" % "<br>".join(e(x) for x in p["embed"]))
+        for title, key in (("Links", "links"), ("Attachments", "attachments"),
+                           ("Reactions", "reactions")):
+            if p[key]:
+                out.append("<h2>%s</h2><ul>%s</ul>"
+                           % (title, "".join("<li>%s</li>" % e(x) for x in p[key])))
+        for note in p["notes"]:
+            out.append("<p>%s</p>" % e(note))
+        return "\n".join(out)
+
+    @script(
+        description="Open the focused Discord message in a window where you can review it with the arrow keys",
+        gesture="kb:alt+v",
+    )
+    def script_viewMessage(self, gesture):
+        row = self._focusedMessageRow()
+        if row is None:
+            ui.message("Not on a message. Arrow to a message in the message list first.")
+            return
+        p = self._messageParts(row)
+        if not (p["text"] or p["embed"] or p["links"] or p["attachments"]):
+            ui.message("That message could not be read.")
+            return
+        title = "Message from %s" % p["author"] if p["author"] else "Discord message"
+        # Browse mode in this window gives arrows, Ctrl+arrows, H for headings
+        # and Escape to close.
+        ui.browseableMessage(self._messageHtml(p), title, isHtml=True)
+
+    # -----------------------------------------------------------------------
     # Jump to the server list / channel list
     # -----------------------------------------------------------------------
     #
@@ -879,9 +1047,10 @@ class AppModule(appModuleHandler.AppModule):
         return any(part == target or part.startswith(target + " (")
                    for part in name.split(", "))
 
-    def _findInWindow(self, match):
-        """Shallow bounded DFS from the foreground for the first obj where match(obj, role)."""
-        root = self._safe(lambda: api.getForegroundObject())
+    def _findInWindow(self, match, root=None, maxDepth=SIDEBAR_SEARCH_DEPTH):
+        """Shallow bounded DFS from root (default: the foreground) for the first obj where match(obj, role)."""
+        if root is None:
+            root = self._safe(lambda: api.getForegroundObject())
         stack = [(root, 0)] if root is not None else []
         visited = 0
         while stack and visited < self.SIDEBAR_SEARCH_NODE_CAP:
@@ -891,7 +1060,7 @@ class AppModule(appModuleHandler.AppModule):
             if match(obj, role):
                 return obj
             # Lists and trees are targets, never containers of one: skip their rows.
-            if depth < self.SIDEBAR_SEARCH_DEPTH and role not in (ROLE_LIST, ROLE_TREEVIEW):
+            if depth < maxDepth and role not in (ROLE_LIST, ROLE_TREEVIEW):
                 for ch in self._iterChildren(obj):
                     stack.append((ch, depth + 1))
         return None
@@ -925,6 +1094,116 @@ class AppModule(appModuleHandler.AppModule):
         # Not focusable: at least put the review cursor there and say where.
         self._safe(lambda: api.setNavigatorObject(obj))
         ui.message(self._name(obj) or "")
+
+    # Age-restricted channels show a gate instead of the message list until you
+    # confirm (dump of 2026-11-08): GROUPING "" > STATICTEXT "Age-Restricted
+    # Channel", STATICTEXT "<explanation>", BUTTON "Go Back", BUTTON "Continue".
+    AGE_GATE_TITLE = "Age-Restricted Channel"
+    AGE_GATE_DEPTH = 3  # window > pane > gate grouping > title
+
+    def _noMessagesHere(self, fallbackMessage):
+        """Say why there are no messages: the age gate if it is up, else fallbackMessage."""
+        title = self._findInWindow(
+            lambda o, r: r == ROLE_STATICTEXT and self._name(o) == self.AGE_GATE_TITLE,
+            maxDepth=self.AGE_GATE_DEPTH)
+        if title is None:
+            ui.message(fallbackMessage)
+            return
+        message = "This channel is age-restricted. Press Continue to view its messages."
+        gate = self._safe(lambda: title.parent)
+        for ch in (self._iterChildren(gate) if gate is not None else ()):
+            if self._role(ch) == ROLE_BUTTON and self._name(ch) == "Continue":
+                self._safe(lambda: ch.setFocus())
+                # After the focus announcement, which would cancel speech queued earlier.
+                core.callLater(REPLY_CONFIRM_DELAY_MS, ui.message, message)
+                return
+        ui.message(message)
+
+    def _isFocusable(self, obj):
+        states = self._safe(lambda: obj.states)
+        return bool(states) and STATE_FOCUSABLE in states
+
+    def _focusRow(self, row):
+        """Focus a list row, or its first child when only that takes focus."""
+        child = self._safe(lambda: row.firstChild)
+        for cand in (row, child):
+            if cand is not None and self._isFocusable(cand):
+                self._safe(lambda c=cand: c.setFocus())
+                return
+        self._moveFocusTo(row)
+
+    def _findNamedGrouping(self, name):
+        return self._findInWindow(lambda o, r: r == ROLE_GROUPING and self._name(o) == name)
+
+    # Friends page layout (dump of 2026-11-08):
+    #   GROUPING "Friends" > PANE "Online — 23" > LIST "" > STATICTEXT header,
+    #       LISTITEM > BUTTON "Open conversation with X", ...
+    #   GROUPING "Active Now" > STATICTEXT "Active Now", BUTTON "Active Now" (one per card)
+    # A channel or DM: GROUPING "<name> (channel)" > ..., EDITABLETEXT compose box
+    # (named "You do not have permission ..." where you can't send).
+
+    @script(
+        description="Move focus to the user status and settings area at the bottom left of Discord",
+        gesture="kb:control+shift+x",
+    )
+    def script_jumpToUserArea(self, gesture):
+        # window > pane > GROUPING "User status and settings" > Voice Details, Disconnect, ..., Mute
+        panel = self._findInWindow(
+            lambda o, r: r == ROLE_GROUPING and self._name(o) == "User status and settings", maxDepth=2)
+        if panel is None:
+            ui.message("Couldn't find the user status and settings area.")
+            return
+        for ch in self._iterChildren(panel):
+            if self._role(ch) in (ROLE_BUTTON, ROLE_TOGGLEBUTTON, ROLE_LINK) and self._name(ch):
+                self._moveFocusTo(ch)
+                return
+        self._moveFocusTo(panel)
+
+    @script(
+        description="Move focus to the first person in Active Now on Discord's Friends page",
+        gesture="kb:control+shift+a",
+    )
+    def script_jumpToActiveNow(self, gesture):
+        panel = self._findNamedGrouping("Active Now")
+        if panel is None:
+            ui.message("Active Now is only on the Friends page, and only when the window is wide enough to show it.")
+            return
+        for ch in self._iterChildren(panel):
+            if self._role(ch) == ROLE_BUTTON:
+                self._moveFocusTo(ch)
+                return
+        ui.message("Nobody is active now.")
+
+    @script(
+        description="Move focus to the message box in a channel or DM, or to the first friend on the Friends page",
+        gesture="kb:control+shift+z",
+    )
+    def script_jumpToComposeOrFriends(self, gesture):
+        channel = self._findInWindow(self._isChannelAnchor, maxDepth=CHANNEL_SEARCH_DEPTH)
+        if channel is not None:
+            for ch in self._iterChildren(channel):
+                if self._role(ch) == ROLE_EDITABLETEXT:
+                    # Focusing it also announces "You do not have permission ..." where relevant.
+                    self._moveFocusTo(ch)
+                    return
+            ui.message("This channel has no message box.")
+            return
+        # A voice channel with its chat closed: window > pane > BUTTON "Show Chat".
+        showChat = self._findInWindow(
+            lambda o, r: r == ROLE_BUTTON and self._name(o) == "Show Chat", maxDepth=2)
+        if showChat is not None:
+            self._moveFocusTo(showChat)
+            return
+        friends = self._findNamedGrouping("Friends")
+        listObj = friends and self._findInWindow(lambda o, r: r == ROLE_LIST, root=friends)
+        if not listObj:
+            ui.message("No message box or friends list here.")
+            return
+        for row in self._iterChildren(listObj):
+            if self._role(row) == ROLE_LISTITEM:
+                self._focusRow(row)
+                return
+        ui.message("This friends list is empty.")
 
     @script(
         description="Move focus to the current server in Discord's server list",
@@ -960,10 +1239,19 @@ class AppModule(appModuleHandler.AppModule):
             return
         isDMs = self._name(listObj) == "Direct Messages"
         place, _ = self._titleParts()
+        # A voice channel's chat leaves the title on the last text channel.
+        anchor = self._findInWindow(self._isChannelAnchor, maxDepth=CHANNEL_SEARCH_DEPTH)
+        voicePrefix = "Text chat for voice channel "
+        anchorName = (self._name(anchor) or "") if anchor is not None else ""
+        if anchorName.startswith(voicePrefix):
+            place = anchorName[len(voicePrefix):].strip()
         first = None
         for link in self._listLinks(listObj):
             name = self._name(link) or ""
-            if first is None and (not isDMs or any(m in name for m in self.DM_LINK_MARKERS)):
+            isConversation = not isDMs or any(m in name for m in self.DM_LINK_MARKERS)
+            if not isConversation:
+                continue  # Friends, Shop, Quests...: the "Friends" link must not match the title
+            if first is None:
                 first = link
             if self._nameMatches(name, place):
                 self._moveFocusTo(link)
@@ -1012,14 +1300,20 @@ class AppModule(appModuleHandler.AppModule):
         """Return the messages LIST that obj lives under, or None.
 
         A cheap bounded parent-walk - lets the show event handler ignore the
-        vast majority of events (which happen outside the message list).
+        vast majority of events (which happen outside the message list). One
+        role read per hop; it stops early at anything the list never sits
+        inside of: the "(channel)" grouping (we'd have passed the list already),
+        a pane, or the window.
         """
         node = obj
         steps = 0
         while node is not None and steps < maxUp:
             steps += 1
-            if self._listStillValid(node):
+            role = self._role(node)
+            if self._listStillValid(node, role):
                 return node
+            if role in (ROLE_PANE, ROLE_WINDOW) or self._isChannelAnchor(node, role):
+                return None
             node = self._safe(lambda n=node: n.parent)
         return None
 
@@ -1067,7 +1361,7 @@ class AppModule(appModuleHandler.AppModule):
                 # the poller kept _cachedList populated, so Alt+1 never had to run
                 # a cold search. Warming unconditionally gives every user that
                 # benefit. A tick with a valid cache is 2 COM calls (role + name);
-                # with no channel landmark in focus it bails in a handful more.
+                # a re-search is a shallow walk of a few dozen.
                 listObj = self._pollListObj()
                 if listObj is not None and getAutoReadMode() != AUTO_OFF:
                     self._announceNew(listObj)
@@ -1087,8 +1381,7 @@ class AppModule(appModuleHandler.AppModule):
         if time.time() - self._lastSearchTime < SEARCH_THROTTLE_SEC:
             return None
         self._lastSearchTime = time.time()
-        # Tight budget: this runs unattended every 1.5s, so it must never stall.
-        self._cachedList = self._searchMessagesList(SEARCH_BUDGET_BACKGROUND)
+        self._cachedList = self._searchMessagesList()
         return self._cachedList
 
     # -- shared announce ----------------------------------------------------
@@ -1234,7 +1527,14 @@ class AppModule(appModuleHandler.AppModule):
         role = self._role(obj)
         if role is None:
             return
-        lines.append("%s%r  %r" % ("  " * depth, role, self._name(obj)))
+        name = self._name(obj)
+        line = "%s%r  %r" % ("  " * depth, role, name)
+        if not name and role == ROLE_STATICTEXT:
+            # Phoenix embeds keep their text off the name; show where it is.
+            text = self._lineText(obj)
+            if text:
+                line += "  text=%r" % text
+        lines.append(line)
         if role == ROLE_LIST:
             lists.append(obj)
         if depth >= SEARCH_MAX_DEPTH:

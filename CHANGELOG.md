@@ -13,6 +13,13 @@ the same commit that bumps the version.
 
 ### Added
 
+- **Alt+V opens the focused message in a read-only window,** where you can read
+  it by line, word or character. Escape closes it.
+- **Ctrl+Shift+Z jumps to the message box** in the open channel or DM, or to the
+  first friend on the Friends page.
+- **Ctrl+Shift+A jumps to the first person in Active Now** on the Friends page.
+- **Ctrl+Shift+X jumps to the user status and settings area** at the bottom
+  left: voice details, Disconnect, your profile, Mute, Deafen and settings.
 - **Ctrl+Shift+S jumps to the server list,** landing on the server you are in, or
   on Direct Messages from the Friends page or a DM.
 - **Ctrl+Shift+C jumps to the channel list,** landing on the channel you are in.
@@ -21,6 +28,27 @@ the same commit that bumps the version.
 
 ### Fixed
 
+- **Voice channel chat works.** Discord names that conversation "Text chat for
+  voice channel …" rather than "… (channel)", so the reading hotkeys, Alt+D,
+  reply, auto-read and Ctrl+Shift+Z did not find it. Ctrl+Shift+C now lands on
+  the voice channel, not the last text channel left in the window title. With
+  the chat closed, Ctrl+Shift+Z moves to the Show Chat button.
+- **Keys keep working with the member list open.** The member list's area is
+  also named "… (channel)", and the add-on could take it for the conversation.
+- **Ctrl+Shift+C on the Friends page lands on the first direct message,** not
+  the Friends link above the list.
+- **Faster, and no more false "No messages here" after using the sidebars.**
+  Finding the message list used to fall back to a slow, time-limited search of
+  the whole window whenever focus was outside the conversation, for example
+  after Ctrl+Shift+S or Ctrl+Shift+C. That search could give up before finding
+  the list. It is now a short walk to the conversation, so it is quick from
+  anywhere. The background check no longer pauses NVDA every few seconds on the
+  Friends and Settings screens, failed lookups are no longer retried, and the
+  auto-read event check stops sooner.
+- **Age-restricted channels no longer report "No messages here".** Until you
+  confirm the 18+ notice, Discord shows that notice instead of the messages. The
+  reading hotkeys, reply and Alt+D now say so and move focus to its Continue
+  button.
 - **Works with Discord's new Rust "Phoenix" client.** The new client wraps the
   conversation in a grouping rather than a landmark, puts each message's text on
   a grouping rather than an article, and places date and "New messages" dividers
