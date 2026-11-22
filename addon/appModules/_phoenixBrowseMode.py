@@ -656,6 +656,8 @@ class PhoenixBrowseDocument(browseMode.BrowseModeDocumentTreeInterceptor):
             field["alwaysReportName"] = True
         if node.level:
             field["level"] = node.level
+        if node.description:
+            field["description"] = node.description
         if node.childControlCount:
             field["_childcontrolcount"] = node.childControlCount
         field["uniqueID"] = node.runtimeId or ("phoenix", node.index)

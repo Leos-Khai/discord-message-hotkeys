@@ -145,19 +145,47 @@ def cleanText(text):
         text = str(text)
     text = text.translate(_PLACEHOLDERS)
     lines = [_WS_RE.sub(" ", line).strip() for line in text.split("\n")]
-    # Drop blank lines at the ends; keep at most one blank line inside.
-    out = []
-    for line in lines:
-        if not line and (not out or not out[-1]):
-            continue
-        out.append(line)
-    while out and not out[-1]:
-        out.pop()
-    return "\n".join(out)
+    # No blank lines: in browse mode each would just say "blank".
+    return "\n".join(line for line in lines if line)
 
 
 def _norm(text):
     return _WS_RE.sub(" ", text.replace("\n", " ")).strip().lower()
+
+
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+_LIST_MARKER_RE = re.compile(r"^(\d+[.)]|[a-z][.)]|[•◦▪‣-])$")
+# The clan tag Discord appends to names everywhere ("Alex Server Tag: ABCD").
+_SERVER_TAG_RE = re.compile(r"\s*Server Tag: [^\s,]+")
+MESSAGE_ACTIONS_NAME = "message actions"
+JUMP_TO_REPLY_NAME = "jump to reply"
+# Wording that only says what pressing a row does; the row's name follows it.
+LEAD_LABEL_PREFIXES = ("open conversation with ",)
+
+
+def _tokensWithin(text, context):
+    """True if every word of text is a word of context ("— 1" in "Admin, 1 member")."""
+    words = _WORD_RE.findall(text)
+    if not words or not context:
+        return False
+    contextWords = set(_WORD_RE.findall(context))
+    return all(w in contextWords for w in words)
+
+
+def _stripServerTag(text):
+    """Drop the server tag from a name, or from the author part of a message line."""
+    if not text or "Server Tag:" not in text:
+        return text
+    head, sep, rest = text.partition(" , ")
+    stripped = _SERVER_TAG_RE.sub("", head).strip()
+    return (stripped + sep + rest) if stripped else text
+
+
+def _isDecoration(raw, normText):
+    """Detail that only adds noise inside a line: channel-type icons, server tags."""
+    if raw.controlType == CT_IMAGE and normText.endswith(" icon"):
+        return True
+    return normText.startswith("server tag:")
 
 
 class RawNode(object):
@@ -203,7 +231,7 @@ class Node(object):
     __slots__ = (
         "raw", "role", "parent", "start", "end", "index", "depth", "label",
         "fieldName", "alwaysReportName", "states", "level", "landmark",
-        "childControlCount", "isField", "obj",
+        "childControlCount", "isField", "obj", "description",
     )
 
     def __init__(self, raw, role, parent, depth):
@@ -222,6 +250,7 @@ class Node(object):
         self.childControlCount = 0
         self.isField = True
         self.obj = None  # NVDAObject, created on demand by the NVDA side
+        self.description = ""  # a tooltip, spoken on focus and quick navigation
 
     @property
     def runtimeId(self):
@@ -388,8 +417,13 @@ class _Builder(object):
         childContext = context
         summary = None
         isTreeRoot = parent is None or depth <= 1
+        skip = set()  # ids of children already said by this node's line
+        controlLine = None  # this control's own line, when it has controls inside
+        # A clickable list item with only text inside - a member-list entry -
+        # is one control, so it gets one line.
+        actsAsControl = role == "listItem" and raw.hasInvoke and not self.hasControlDescendant(raw)
 
-        if role in CONTROL_ROLES:
+        if role in CONTROL_ROLES or actsAsControl:
             if role == "edit":
                 value = cleanText(raw.value) if isinstance(raw.value, str) else ""
                 node.fieldName = name
@@ -397,17 +431,31 @@ class _Builder(object):
                 self.emit(node, value or " ")
             elif role in ("slider", "progressBar", "spinButton") and isinstance(raw.value, str) and raw.value:
                 self.emit(node, ("%s %s" % (name, cleanText(raw.value))).strip())
-            elif raw.children and not self.hasControlDescendant(raw):
-                # Only text inside (a DM link's status and server tag, the
-                # profile button's user name): fold it into the one line, so
-                # moving by line doesn't say "button" once per detail.
-                self.emit(node, self.foldedText(raw, name, node) or " ")
+            elif actsAsControl and len(raw.children) > 1:
+                self.emit(node, self._memberLine(raw, node) or _stripServerTag(name) or " ")
+                node.end = self.length
+                return self._finish(node, parent, role, depth)
+            elif not self.hasControlDescendant(raw):
+                # Only text inside (a DM link's status, the profile button's
+                # user name): fold it into the one line, so moving by line
+                # doesn't say "button" once per detail.
+                self.emit(node, self.foldedText(raw, _stripServerTag(name), node) or " ")
                 node.end = self.length
                 return self._finish(node, parent, role, depth)
             else:
-                self.emit(node, name or " ")
-            if name:
-                childContext = context + [_norm(name)]
+                # Controls inside (an activity card's "open profile"): the text
+                # parts still make this control's own line - and its label, when
+                # it has no name of its own - and the inner controls follow.
+                parts, seen = ([name], [_norm(name)]) if name else ([], [])
+                for ch in raw.children:
+                    if semanticRole(ch) not in CONTROL_ROLES and not self.hasControlDescendant(ch):
+                        self._collect(ch, parts, seen, node)
+                        skip.add(id(ch))
+                controlLine = ", ".join(parts)
+                self.emit(node, controlLine or " ")
+                controlLine = _norm(controlLine)
+            if name or controlLine:
+                childContext = context + [controlLine or _norm(name)]
         elif role in TEXT_ROLES:
             text = name
             if not text and isinstance(raw.value, str):
@@ -428,7 +476,9 @@ class _Builder(object):
         else:
             # Container.
             if not isTreeRoot and name:
-                landmark = landmarkFor(name, depth) if role in ("grouping", "pane") else None
+                # Focusable groupings are cards (a quest, a message), not regions.
+                landmark = landmarkFor(name, depth) \
+                    if role in ("grouping", "pane") and not raw.focusable else None
                 if landmark:
                     node.landmark = landmark
                     node.fieldName = name
@@ -441,7 +491,30 @@ class _Builder(object):
                     # time" (or "author replying to X , ..."). That one line is
                     # what you want on Down arrow; parts of the row that only
                     # repeat it (the author button, date, text) are left out.
-                    self.emit(node, name)
+                    # A message that starts a group has a header (a level 3
+                    # heading: author, server tag, dates); the line takes its
+                    # place as the heading, so H moves between authors' posts
+                    # as it did in the Electron client.
+                    # Discord separates the parts with " , "; ", " reads the
+                    # same and is cleaner in braille.
+                    line = _stripServerTag(name).replace(" , ", ", ")
+                    header = self._messageHeader(raw)
+                    if header is not None:
+                        # Only the first line is the heading: NVDA repeats
+                        # "heading" on every line inside one.
+                        first, sep, rest = line.partition("\n")
+                        heading = Node(header, "heading", node, depth + 1)
+                        heading.level = header.headingLevel
+                        heading.label = first
+                        heading.start = self.length
+                        self.emit(heading, first)
+                        heading.end = self.length
+                        if sep:
+                            self.emit(node, rest)
+                        self.foldSubtree(header, heading)
+                        skip.add(id(header))
+                    else:
+                        self.emit(node, line)
                     summary = _norm(name)
                     childContext = context + [summary]
                 elif (role in LABELLED_CONTAINER_ROLES or role == "listItem") \
@@ -451,20 +524,69 @@ class _Builder(object):
                     self.emit(node, name)
                     childContext = context + [_norm(name)]
 
+        if role == "listItem" and not actsAsControl:
+            self._renderListItemLead(raw, node, depth, skip)
+
         # Children. Text that only repeats a recent sibling ("Blind samurai"
         # beside the server item "2 mentions, Blind samurai", or a friend's
         # user name beside their avatar "sam1234, Idle") is dropped.
         recent = []
         childNodes = 0
+        prevChild = None    # node rendered for the previous child
+        recentControls = []  # (line, node) of the last few controls rendered
+        afterEdit = False
+        # Where Discord puts hover tooltips as plain text after each button:
+        # the message toolbar, and the composer's buttons after the message box.
+        lowerName = name.lower()
+        tooltipZone = lowerName == MESSAGE_ACTIONS_NAME
+        isConversation = lowerName.endswith("(channel)") or lowerName.startswith("text chat for voice channel")
         for ch in raw.children:
             if ch.controlType == CT_TITLEBAR:
                 continue  # the OS title bar's System / Minimize / Close
+            if id(ch) in skip:
+                continue
             if summary and self.subtreeCovered(ch, summary):
                 self.foldSubtree(ch, node)
                 continue
+            chRole = semanticRole(ch)
+            if summary and _norm(ch.name).startswith("server tag:"):
+                self.foldSubtree(ch, node)  # the clan tag of a replied-to author
+                continue
+            if summary and _norm(ch.name) == JUMP_TO_REPLY_NAME and chRole == "button":
+                prevChild = self._renderReplyContext(raw, ch, node, depth, skip)
+                continue
+            if prevChild is not None and self._foldTooltip(
+                    ch, chRole, prevChild, tooltipZone or (isConversation and afterEdit)):
+                continue
+            preview = None
+            if chRole in CONTROL_ROLES and not self.hasControlDescendant(ch):
+                preview = _norm(self.foldedText(ch, _stripServerTag(cleanText(ch.name)), None))
+                chName = _norm(cleanText(ch.name))
+                # Inside a control (an Active Now card), same-named buttons are
+                # one action shown several ways; elsewhere only exact repeats.
+                same = [n for (line, n) in recentControls
+                        if line == preview or (controlLine and chName and _norm(n.label) == chName)] \
+                    if preview else []
+                if same:
+                    # The same control again ("View Game Profile" four times
+                    # over one game, an embed's image button titled like its
+                    # link): one line is enough.
+                    self.foldSubtree(ch, same[-1])
+                    continue
+                if preview and controlLine and preview in controlLine:
+                    # Repeats the enclosing control's line (an activity card's
+                    # game-name button): say it once.
+                    self.foldSubtree(ch, node)
+                    continue
             child = self.render(ch, node, depth + 1, childContext, " ".join(recent))
             recent.append(self.rawText(ch))
             del recent[:-SIBLING_DEDUPE_WINDOW]
+            prevChild = child
+            if child is not None and preview:
+                recentControls.append((preview, child))
+                del recentControls[:-SIBLING_DEDUPE_WINDOW]
+            if chRole == "edit":
+                afterEdit = True
             if child is not None and child.role == "listItem":
                 childNodes += 1
             elif child is not None and role == "tree" and child.role == "treeItem":
@@ -472,6 +594,134 @@ class _Builder(object):
         node.childControlCount = childNodes
         node.end = self.length
         return self._finish(node, parent, role, depth)
+
+    def _renderListItemLead(self, raw, node, depth, skip):
+        """A friend row: its first control plus the details after it, as one line.
+
+        Friends list (2026-11-22): LISTITEM > BUTTON "Open conversation with
+        Sam", GRAPHIC "sam1234, Idle", TEXT "Sam", TEXT "sam1234",
+        TEXT "Idle", BUTTON "Message Sam", BUTTON "More options for Sam".
+        Read as is, that is five lines per friend; this makes it "Sam,
+        sam1234, Idle" (the button) followed by the two action buttons.
+        """
+        children = [ch for ch in raw.children if ch.controlType != CT_TITLEBAR]
+        if not children:
+            return
+        lead = children[0]
+        leadRole = semanticRole(lead)
+        if leadRole not in ("button", "link") or self.hasControlDescendant(lead):
+            return
+        details = []
+        for ch in children[1:]:
+            if semanticRole(ch) in CONTROL_ROLES or self.hasControlDescendant(ch):
+                break
+            details.append(ch)
+        if not details:
+            return  # nothing to merge; render the row normally
+        leadNode = Node(lead, leadRole, node, depth + 1)
+        self._setStates(leadNode)
+        label = _stripServerTag(cleanText(lead.name))
+        for prefix in LEAD_LABEL_PREFIXES:
+            if label.lower().startswith(prefix):
+                label = label[len(prefix):]
+                break
+        leadNode.label = label
+        parts, seen = ([label], [_norm(label)]) if label else ([], [])
+        if lead.runtimeId:
+            self.folded.append((lead.runtimeId, leadNode))
+        for ch in lead.children:
+            self._collect(ch, parts, seen, leadNode)
+        for ch in details:
+            self._collect(ch, parts, seen, leadNode)
+            skip.add(id(ch))
+        leadNode.start = self.length
+        self.emit(leadNode, ", ".join(parts) or " ")
+        leadNode.end = self.length
+        skip.add(id(lead))
+
+    def _renderReplyContext(self, body, jump, node, depth, skip):
+        """A reply's context as one line: "Jump To Reply, @Kim: quoted text".
+
+        Group DM (2026-11-22): the message body starts BUTTON "Jump To Reply",
+        BUTTON "@Kim", BUTTON "Server Tag: WXYZ", BUTTON "<quoted text>", then
+        the header. The line is the Jump To Reply button, so Enter still jumps.
+        """
+        children = body.children
+        start = children.index(jump)
+        mention, quote = "", ""
+        for ch in children[start + 1:]:
+            if semanticRole(ch) != "button":
+                break
+            text = cleanText(ch.name)
+            if text.lower().startswith("server tag:"):
+                pass
+            elif text.startswith("@") and not mention:
+                mention = text
+            elif not quote:
+                quote = text.replace("\n", " ")
+            else:
+                break
+            skip.add(id(ch))
+        jumpNode = Node(jump, "button", node, depth + 1)
+        self._setStates(jumpNode)
+        jumpNode.label = cleanText(jump.name)
+        line = jumpNode.label
+        if mention or quote:
+            line += ", " + ": ".join(p for p in (mention, quote) if p)
+        jumpNode.start = self.length
+        self.emit(jumpNode, line)
+        jumpNode.end = self.length
+        for ch in children[start + 1:]:
+            if id(ch) in skip:
+                self.foldSubtree(ch, jumpNode)
+        return jumpNode
+
+    def _foldTooltip(self, raw, role, prevNode, inTooltipZone):
+        """Merge a tooltip shown as text after its control. True if merged."""
+        if raw.children or role in CONTROL_ROLES or role == "graphic":
+            return False
+        if prevNode.role not in CONTROL_ROLES:
+            return False
+        text = cleanText(raw.name) or (cleanText(raw.value) if isinstance(raw.value, str) else "")
+        normText = _norm(text)
+        if not normText:
+            return False
+        label = _norm(prevNode.label)
+        # "Originally known as Alex#1234. Alex#1234" after the link of that name.
+        echoes = (len(label) >= 6 and normText.startswith(label)
+                  and (len(normText) == len(label) or not normText[len(label)].isalnum()))
+        if not echoes and not (inTooltipZone and prevNode.role in ("button", "toggleButton")):
+            return False
+        if not echoes and not prevNode.description:
+            prevNode.description = text  # NVDA says it on B, Tab and focus
+        self.foldSubtree(raw, prevNode)
+        return True
+
+    def _memberLine(self, raw, node):
+        """A member-list entry from its parts, display name first.
+
+        Member list (2026-11-22): LISTITEM "jo_user, Online Jo Server Tag:
+        ABCD Playing ..." > GRAPHIC "jo_user, Online", TEXT "Jo", TEXT
+        "Server Tag: ABCD", GROUPING "Playing ...". The item's own name runs
+        those together; this gives "Jo, jo_user, Online, Playing ...".
+        """
+        children = list(raw.children)
+        if (len(children) > 1 and children[0].controlType == CT_IMAGE
+                and children[1].controlType == CT_TEXT and children[1].name):
+            children[0], children[1] = children[1], children[0]
+        parts, seen = [], []
+        if raw.runtimeId:
+            self.folded.append((raw.runtimeId, node))
+        for ch in children:
+            self._collect(ch, parts, seen, node)
+        return ", ".join(parts)
+
+    @staticmethod
+    def _messageHeader(raw):
+        for ch in raw.children:
+            if ch.controlType == CT_TEXT and ch.headingLevel:
+                return ch
+        return None
 
     def _finish(self, node, parent, role, depth):
         if node.end == node.start:
@@ -520,30 +770,50 @@ class _Builder(object):
         return False
 
     def foldedText(self, raw, label, node):
-        """label plus the text below raw that label doesn't already say."""
-        parts = [label] if label else []
-        seen = _norm(label)
-        stack = list(reversed(raw.children))
-        while stack:
-            ch = stack.pop()
-            if ch.runtimeId:
-                self.folded.append((ch.runtimeId, node))
-            text = cleanText(ch.name) or (cleanText(ch.value) if isinstance(ch.value, str) else "")
-            normText = _norm(text)
-            if normText and _ALNUM_RE.search(normText) and normText not in seen:
-                parts.append(text.replace("\n", " "))
-                seen += " " + normText
-            stack.extend(reversed(ch.children))
+        """label plus the text below raw that label doesn't already say.
+
+        With node None this only previews the line; otherwise the elements
+        merged in are mapped to node, so focus on one still finds its place.
+        """
+        parts, seen = ([label], [_norm(label)]) if label else ([], [])
+        for ch in raw.children:
+            self._collect(ch, parts, seen, node)
         return ", ".join(parts)
+
+    def _collect(self, raw, parts, seen, node):
+        """Append the new text in raw's subtree to parts (see foldedText)."""
+        stack = [raw]
+        while stack:
+            r = stack.pop()
+            if node is not None and r.runtimeId:
+                self.folded.append((r.runtimeId, node))
+            stack.extend(reversed(r.children))
+            text = cleanText(r.name) or (cleanText(r.value) if isinstance(r.value, str)
+                                         and r.controlType != CT_HYPERLINK else "")
+            normText = _norm(text)
+            if not normText or not _ALNUM_RE.search(normText) or _isDecoration(r, normText):
+                continue
+            if any(normText in s for s in seen) or _tokensWithin(normText, " ".join(seen)):
+                continue
+            # Keep only the comma-separated parts not said yet: "alex_
+            # user, Online" after "Alex (direct message), Online" adds
+            # just the user name; "Carl-bot, Online" after "Carl-bot", "Online".
+            pieces = text.replace("\n", " ").split(", ")
+            fresh = [p for p in pieces if _norm(p) and not any(_norm(p) in s for s in seen)]
+            if not fresh:
+                continue
+            text = ", ".join(fresh)
+            parts.append(_stripServerTag(text))
+            seen.append(_norm(text))
 
     @staticmethod
     def _isRedundant(normText, context, prevText):
-        if not _ALNUM_RE.search(normText):
-            return True  # "•" and similar decoration
+        if not _ALNUM_RE.search(normText) or _LIST_MARKER_RE.match(normText):
+            return True  # "•", "1." and similar decoration
         for ctx in context:
-            if normText in ctx:
+            if normText in ctx or _tokensWithin(normText, ctx):
                 return True
-        return bool(prevText) and normText in prevText
+        return bool(prevText) and (normText in prevText or _tokensWithin(normText, prevText))
 
     @staticmethod
     def _setStates(node):
