@@ -710,13 +710,12 @@ class _Builder(object):
         skip.add(id(lead))
 
     def _renderMessageTop(self, raw, node, depth, name, skip):
-        """A message as: "author: text" (a heading), the time, what it replies to.
+        """A message as: "author, time" (a heading), what it replies to, the text.
 
         The body's name is "author , text , time" (or "author replying to X ,
-        ..."). The heading says who and what (H moves message by message); a
-        long message continues on the lines after it; then the time and the
-        reply's quote. Links, attachments, reactions and "Edited" follow, from
-        the body's children.
+        ..."). The heading says who and when (H moves message by message);
+        then the reply's quote, and the text line by line. Links, attachments,
+        reactions and "Edited" follow, from the body's children.
         """
         fields = [f.strip() for f in name.split(" , ")]
         if len(fields) >= 3:
@@ -739,10 +738,9 @@ class _Builder(object):
             badges = [cleanText(ch.name) for ch in header.children if ch.controlType == CT_IMAGE and ch.name]
             if names:
                 author = ", ".join(names + badges)
-        # The heading is who said it and what: "Orion: 6 7!". A message of
-        # several lines keeps its first line there and the rest just below.
-        firstLine, _, moreLines = cleanText(text).partition("\n")
-        headingText = ": ".join(p for p in (author, firstLine) if p)
+        # The heading is who and when: "Orion, 8:49 am"; the message follows
+        # on its own lines, so a message of several lines reads in order.
+        headingText = ", ".join(p for p in (author, stamp) if p)
         if headingText:
             # A message that starts a group has a header element (a level 3
             # heading: author, server tag, dates); the line stands in for it,
@@ -758,10 +756,6 @@ class _Builder(object):
                 self.foldSubtree(header, heading)
         if header is not None:
             skip.add(id(header))
-        if moreLines:
-            self.emit(node, moreLines)
-        if stamp:
-            self.emit(node, stamp)
         jump = next((ch for ch in raw.children if semanticRole(ch) == "button"
                      and _norm(ch.name) == JUMP_TO_REPLY_NAME), None)
         if jump is not None:
@@ -769,6 +763,8 @@ class _Builder(object):
             skip.add(id(jump))
         elif replyTo:
             self.emit(node, "Replying to %s" % replyTo)
+        if text:
+            self.emit(node, text)
 
     def _renderReplyContext(self, body, jump, node, depth, skip):
         """A reply's context as one line: "Replying to @Kim: quoted text".
