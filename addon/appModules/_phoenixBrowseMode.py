@@ -828,6 +828,11 @@ class PhoenixBrowseDocument(browseMode.BrowseModeDocumentTreeInterceptor):
                     break
                 candidate = candidate.parent
             obj = self._objectForNode(target)
+            while obj is None and target is not None:
+                # A line the document made up (a follow-on message's author
+                # line) has no element of its own: use the one it belongs to.
+                target = target.parent
+                obj = self._objectForNode(target)
             if obj is None:
                 return
             if target is not None and target.role in SELECT_ON_ACTIVATE_ROLES and target.isActionable:

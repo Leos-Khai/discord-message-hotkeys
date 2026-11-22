@@ -504,26 +504,7 @@ class _Builder(object):
                     # heading: author, server tag, dates); the line takes its
                     # place as the heading, so H moves between authors' posts
                     # as it did in the Electron client.
-                    # Discord separates the parts with " , "; ", " reads the
-                    # same and is cleaner in braille.
-                    line = _stripServerTag(name).replace(" , ", ", ")
-                    header = self._messageHeader(raw)
-                    if header is not None:
-                        # Only the first line is the heading: NVDA repeats
-                        # "heading" on every line inside one.
-                        first, sep, rest = line.partition("\n")
-                        heading = Node(header, "heading", node, depth + 1)
-                        heading.level = header.headingLevel
-                        heading.label = first
-                        heading.start = self.length
-                        self.emit(heading, first)
-                        heading.end = self.length
-                        if sep:
-                            self.emit(node, rest)
-                        self.foldSubtree(header, heading)
-                        skip.add(id(header))
-                    else:
-                        self.emit(node, line)
+                    self._renderMessageTop(raw, node, depth, name, skip)
                     summary = _norm(name)
                     childContext = context + [summary]
                 elif (role in LABELLED_CONTAINER_ROLES or role == "listItem") \
@@ -719,8 +700,65 @@ class _Builder(object):
         leadNode.end = self.length
         skip.add(id(lead))
 
+    def _renderMessageTop(self, raw, node, depth, name, skip):
+        """A message as separate lines: name, time, what it replies to, text.
+
+        The body's name is "author , text , time" (or "author replying to X ,
+        ..."). Read as one line, a long message buries who wrote it and when;
+        so the author is a heading of its own (H moves message by message),
+        then the time, the reply's quote, and the text line by line. Links,
+        attachments, reactions and "Edited" follow, from the body's children.
+        """
+        fields = [f.strip() for f in name.split(" , ")]
+        if len(fields) >= 3:
+            author, text, stamp = fields[0], " , ".join(fields[1:-1]), fields[-1]
+        elif len(fields) == 2:
+            author, text, stamp = fields[0], fields[1], ""
+        else:
+            author, text, stamp = "", name, ""
+        author = _SERVER_TAG_RE.sub("", author).strip()
+        replyTo = ""
+        if " replying to " in author:
+            author, replyTo = author.split(" replying to ", 1)
+            replyTo = _SERVER_TAG_RE.sub("", replyTo).strip()
+        header = self._messageHeader(raw)
+        if header is not None:
+            # The header keeps the author (a button) apart from badges such as
+            # "Verified App" (graphics), which the summary runs together.
+            names = [cleanText(ch.name) for ch in header.children if ch.controlType == CT_BUTTON
+                     and ch.name and not ch.name.startswith("Server Tag:")][:1]
+            badges = [cleanText(ch.name) for ch in header.children if ch.controlType == CT_IMAGE and ch.name]
+            if names:
+                author = ", ".join(names + badges)
+        if author:
+            # A message that starts a group has a header element (a level 3
+            # heading: author, server tag, dates); the line stands in for it,
+            # and a follow-on message gets the same line, at the same level.
+            headingRaw = header if header is not None else RawNode(CT_TEXT, author, headingLevel=3)
+            heading = Node(headingRaw, "heading", node, depth + 1)
+            heading.level = headingRaw.headingLevel or 3
+            heading.label = author
+            heading.start = self.length
+            self.emit(heading, author)
+            heading.end = self.length
+            if header is not None:
+                self.foldSubtree(header, heading)
+        if header is not None:
+            skip.add(id(header))
+        if stamp:
+            self.emit(node, stamp)
+        jump = next((ch for ch in raw.children if semanticRole(ch) == "button"
+                     and _norm(ch.name) == JUMP_TO_REPLY_NAME), None)
+        if jump is not None:
+            self._renderReplyContext(raw, jump, node, depth, skip)
+            skip.add(id(jump))
+        elif replyTo:
+            self.emit(node, "Replying to %s" % replyTo)
+        if text:
+            self.emit(node, text)
+
     def _renderReplyContext(self, body, jump, node, depth, skip):
-        """A reply's context as one line: "Jump To Reply, @Kim: quoted text".
+        """A reply's context as one line: "Replying to @Kim: quoted text".
 
         Group DM (2026-11-22): the message body starts BUTTON "Jump To Reply",
         BUTTON "@Kim", BUTTON "Server Tag: WXYZ", BUTTON "<quoted text>", then
@@ -745,9 +783,10 @@ class _Builder(object):
         jumpNode = Node(jump, "button", node, depth + 1)
         self._setStates(jumpNode)
         jumpNode.label = cleanText(jump.name)
-        line = jumpNode.label
-        if mention or quote:
-            line += ", " + ": ".join(p for p in (mention, quote) if p)
+        # The button is still Jump To Reply, so Enter jumps to the original;
+        # the line says what it is: "Replying to @Kim: quoted text".
+        line = "Replying to " + ": ".join(p for p in (mention, quote) if p) \
+            if (mention or quote) else jumpNode.label
         jumpNode.start = self.length
         self.emit(jumpNode, line)
         jumpNode.end = self.length

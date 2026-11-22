@@ -15,9 +15,9 @@ the same commit that bumps the version.
 
 - **Browse mode in the new Rust "Phoenix" client.** Phoenix is not a web page,
   so NVDA gave it no browse mode at all. The add-on now builds one from the
-  client's accessibility tree: arrow through messages (one line each: author,
-  text, time; replies say what they reply to in one line), use quick navigation
-  keys (H jumps between authors' messages; K, B, F, E, L, I, S; D for the
+  client's accessibility tree: arrow through messages (each one reads author,
+  time, what it replies to, then its text line by line), use quick navigation
+  keys (H moves message by message; K, B, F, E, L, I, S; D for the
   sections F6 moves between: top bar, server list, channel list, user area,
   channel header, the page or conversation, and the member list or profile
   panel), NVDA+F7, find,
