@@ -161,6 +161,7 @@ _ICON_SUFFIX_RE = re.compile(r", [^,]* icon$", re.IGNORECASE)
 _SHORTCODES_RE = re.compile(r"(\s+:[\w+-]+:)+$")
 _QUOTE_MARK_RE = re.compile(r"^\s*>\s?")
 MESSAGE_ACTIONS_NAME = "message actions"
+EDITED_MARK = "(edited)"
 JUMP_TO_REPLY_NAME = "jump to reply"
 # Window controls Phoenix draws as children of the window itself (automation
 # IDs win-minimize / win-maximize / win-close). Not page content; NVDA's and
@@ -374,7 +375,7 @@ def landmarkFor(name, depth, inMainPane=True):
     """
     lower = name.lower()
     if lower.startswith("members list for") or lower.endswith("'s profile") \
-            or lower.endswith("(thread)"):
+            or lower.endswith("(thread)") or lower == "create thread":
         return "complementary"
     if lower.endswith("(channel)") or lower.startswith(("text chat for voice channel", "text chat for stage channel")):
         return "main"
@@ -621,8 +622,7 @@ class _Builder(object):
                     # heading: author, server tag, dates); the line takes its
                     # place as the heading, so H moves between authors' posts
                     # as it did in the Electron client.
-                    self._renderMessageTop(raw, node, depth, name, skip)
-                    summary = _norm(name)
+                    summary = _norm(self._renderMessageTop(raw, node, depth, name, skip))
                     childContext = context + [summary]
                 elif (role in LABELLED_CONTAINER_ROLES or role == "listItem") \
                         and len(name) <= MAX_LABEL_LINE \
@@ -669,8 +669,14 @@ class _Builder(object):
                     and not ch.children and not (isinstance(ch.value, str) and ch.value):
                 self.foldSubtree(ch, node)  # an unlabelled, empty button says only "button"
                 continue
-            if summary and _norm(ch.name).startswith("server tag:"):
-                self.foldSubtree(ch, node)  # the clan tag of a replied-to author
+            if (summary or chRole not in CONTROL_ROLES) and _norm(ch.name).startswith("server tag:"):
+                self.foldSubtree(ch, node)  # a clan tag: a replied-to author's, a quoted one's
+                continue
+            if chRole == "graphic" and not ch.children and node.label and ch.name \
+                    and _norm(ch.name) in _norm(node.label):
+                # An avatar beside its owner's name: "Kim" under "Kim, 12:07 pm"
+                # (the message quoted in Create Thread).
+                self.foldSubtree(ch, node)
                 continue
             if summary and _norm(ch.name) == JUMP_TO_REPLY_NAME and chRole == "button":
                 prevChild = self._renderReplyContext(raw, ch, node, depth, skip)
@@ -886,8 +892,9 @@ class _Builder(object):
         if header is not None:
             # The header keeps the author (a button) apart from badges such as
             # "Verified App" (graphics), which the summary runs together.
+            # In the Inbox the author is text and the button is a role icon.
             names = [cleanText(ch.name) for ch in header.children if ch.controlType == CT_BUTTON
-                     and ch.name and not ch.name.startswith("Server Tag:")][:1]
+                     and ch.name and not ch.name.startswith(("Server Tag:", "Role icon"))][:1]
             badges = [cleanText(ch.name) for ch in header.children if ch.controlType == CT_IMAGE and ch.name]
             if names:
                 author = ", ".join(names + badges)
@@ -916,32 +923,83 @@ class _Builder(object):
             skip.add(id(jump))
         elif replyTo:
             self.emit(node, "Replying to %s" % replyTo)
+        for ch in raw.children:
+            if ch.controlType == CT_GROUP and _norm(ch.name) == MESSAGE_ACTIONS_NAME:
+                # The toolbar shown while the mouse is over a message; the
+                # context menu (Applications key) has the same actions.
+                skip.add(id(ch))
+                self.foldSubtree(ch, node)
         content = self._messageTextGroup(raw, text)
+        said = text
+        if content is not None:
+            own = cleanText(content.name)
+            rest = _norm(text)[len(_norm(own)):].strip()
+            if rest and rest != EDITED_MARK:
+                # The summary runs on into what follows the text: a thread
+                # started from it ("Thread <name> 1 Message ›"), an embed.
+                # Those read from their own elements, after the text.
+                text = said = own
         if content is not None and self._hasStructure(content):
             # Lists, code blocks, quotes, headings: the summary runs them
             # together on one line; read them from the message's own parts.
             self._renderMessageContent(content, node, depth + 1)
             skip.add(id(content))
-        elif text:
-            self.emit(node, text)
+        else:
+            if text and not any(ch.controlType == CT_EDIT for ch in raw.children):
+                # While a message is being edited its text is the edit box's value.
+                self.emit(node, text)
+            if content is not None:
+                # Read in the summary; an edited message's "Edited <date>" stamp too.
+                skip.add(id(content))
+                self.foldSubtree(content, node)
+        # What the message line said, for leaving out children that repeat it.
+        return " , ".join(p for p in (fields[0], said, stamp) if p) if len(fields) >= 2 else name
 
     @staticmethod
     def _messageTextGroup(body, text):
-        """The grouping holding a message's text: named as the text, after the header."""
+        """The grouping holding a message's text, named as the text.
+
+        An edited message's summary ends " (edited)", which its grouping lacks."""
         want = _norm(text)
-        for ch in body.children:
-            if ch.controlType == CT_GROUP and not ch.focusable and ch.name and _norm(ch.name) == want:
+        kids = body.children
+        for i, ch in enumerate(kids):
+            if ch.controlType != CT_GROUP or ch.focusable or not ch.name:
+                continue
+            own = _norm(ch.name)
+            if not want.startswith(own):
+                continue
+            rest = want[len(own):].strip()
+            if rest.startswith(EDITED_MARK):
+                rest = rest[len(EDITED_MARK):].strip()
+            # Not a mention or emoji at the start of the text ("@Kim see
+            # this"): the rest of the summary must be what comes after it.
+            later = " ".join(_norm(k.name) for k in kids[i + 1:] if k.name)
+            if not rest or rest in later:
                 return ch
         return None
 
     @staticmethod
     def _hasStructure(group):
-        """True if a message's text has blocks: more than one part, or a list/quote/heading."""
-        kids = group.children
-        if len(kids) > 1:
-            return True
-        return any(k.controlType in (CT_LIST, CT_GROUP) or (k.controlType == CT_TEXT and k.headingLevel)
-                   for k in kids)
+        """True if a message's text has blocks the summary would run together:
+        a list, quote, heading, code block (a Copy button, or lines in a part).
+        Mentions and links are buttons inside a line, not blocks.
+
+        False if some of the text is in unnamed runs: beside inline code or
+        bold, plain words are TEXT "" (2026-11-22), so the parts would lose
+        them; the summary keeps them (and its line breaks).
+        """
+        def hidden(n):
+            if n.controlType == CT_TEXT and not n.name and not n.children:
+                return True
+            return any(hidden(c) for c in n.children)
+        if hidden(group):
+            return False
+        for k in group.children:
+            if k.controlType in (CT_LIST, CT_GROUP) or (k.controlType == CT_BUTTON and _norm(k.name) == "copy"):
+                return True
+            if k.controlType == CT_TEXT and (k.headingLevel or any("\n" in (c.name or "") for c in k.children)):
+                return True
+        return False
 
     def _renderMessageContent(self, group, parent, depth):
         """A message's text, block by block (dumps of 2026-11-22).
@@ -1013,7 +1071,8 @@ class _Builder(object):
 
         Group DM (2026-11-22): the message body starts BUTTON "Jump To Reply",
         BUTTON "@Kim", BUTTON "Server Tag: WXYZ", BUTTON "<quoted text>", then
-        the header. The line is the Jump To Reply button, so Enter still jumps.
+        the header. In a server channel the author button is "Kim" (expands to
+        the profile). The line is the Jump To Reply button, so Enter still jumps.
         """
         children = body.children
         start = children.index(jump)
@@ -1024,8 +1083,9 @@ class _Builder(object):
             text = cleanText(ch.name)
             if text.lower().startswith("server tag:"):
                 pass
-            elif text.startswith("@") and not mention:
-                mention = text
+            elif not mention and not quote and (text.startswith("@") or ch.hasExpandCollapse):
+                # "@Kim" in a group DM; "Kim" (opens the profile) in a server.
+                mention = text if text.startswith("@") else "@" + text
             elif not quote:
                 quote = text.replace("\n", " ")
             else:

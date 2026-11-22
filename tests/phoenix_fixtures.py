@@ -168,8 +168,46 @@ def formattedScreen():
             text("Smaller heading", headingLevel=2),
             node(pb.CT_LIST, "", [li(text("bullet one"))]),
             node(pb.CT_LIST, "", [li(text("1."), text("first"))])]),
-        message("Ann", "just text", "12:09 pm", "", headed=False),
+        # The mouse is over this one: its hover toolbar is in the tree.
+        message("Ann", "just text", "12:09 pm", "", headed=False, extra=[group("Message Actions", [
+            button("Click to react with thumbsup"), text(":thumbsup:"), button("Edit"), button("More")])]),
     ]
+    # A reply in a server channel: the author button has no "@" and opens the profile.
+    reply = message("Bob", "a server reply", "12:12 pm", "Today at 12:12 pm")
+    body = reply.children[0]
+    body.children[:0] = [button("Jump To Reply"),
+                         button("Ann", [text("Ann")], hasExpandCollapse=True, hasInvoke=False),
+                         button("Server Tag: WXYZ", hasExpandCollapse=True, hasInvoke=False),
+                         button("Code block: line one line two", [text(""), text("", [text("line one")])])]
+    msgs.children.append(reply)
+    msgs.children += [
+        # Mentions are buttons in the line; the plain words are an unnamed run.
+        message("Cy", "@Ann @Bob swap roles", "12:20 pm", "Today at 12:20 pm", content=[
+            button("@Ann", [text("")], hasExpandCollapse=True, hasInvoke=False),
+            button("@Bob", [text("")], hasExpandCollapse=True, hasInvoke=False), text("")]),
+        # Inline code beside a list: plain runs unnamed, so the summary is read.
+        message("Cy", "The 7 with old says: one", "12:21 pm", "", headed=False, content=[
+            text("", [text("The 7 with old")]), text(""), text("", [text("says")]), text(":"),
+            node(pb.CT_LIST, "", [li(text("", [text("one")]))])]),
+        message("Cy", "fixed it (edited)", "12:22 pm", "", headed=False, content=[
+            text(""), text("Edited Today at 12:23 pm", [text("(edited)")])]),
+        # A thread started from a message: the summary runs on into its button.
+        message("Cy", "start here", "12:24 pm", "", headed=False,
+                extra=[button("Thread Plans 1 Message ›", [text("Plans"), text("1 Message ›")])]),
+    ]
+    started = msgs.children[-1]
+    started.name = started.children[0].name = "Cy Server Tag: ABCD , start here Thread Plans 1 Message › , 12:24 pm"
+    return screen
+
+
+def inboxRoleIconScreen():
+    """An Inbox mention whose header is TEXT author + BUTTON "Role icon, ..."."""
+    screen = channelScreen()
+    msgs = _find(screen, lambda n: n.name == "Messages in general")
+    m = message("Dee", "ping", "10:09 am", "Today at 10:09 am", tag="")
+    m.children[0].children[0].children = [text("Dee"), button("Role icon, Admin", [node(pb.CT_IMAGE, "Role icon, Admin")]),
+                                          text("10:09 am")]
+    msgs.children.append(m)
     return screen
 
 

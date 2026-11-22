@@ -98,8 +98,34 @@ class FormattedMessages(unittest.TestCase):
         item = self.buf.nodeAt(self.buf.text.index("1. first"))
         self.assertEqual((item.role, item.parent.role), ("listItem", "list"))
 
+    def test_server_reply_names_its_author_then_the_quote(self):
+        self.assertEqual(self.after("Bob, 12:12 pm", 3),
+                         ["Bob, 12:12 pm", "Replying to @Ann: Code block: line one line two", "a server reply"])
+
     def test_plain_message_unchanged(self):
         self.assertEqual(self.after("Ann, 12:09 pm", 2), ["Ann, 12:09 pm", "just text"])
+
+    def test_mentions_stay_in_the_line(self):
+        self.assertEqual(self.after("Cy, 12:20 pm", 2), ["Cy, 12:20 pm", "@Ann @Bob swap roles"])
+
+    def test_unnamed_text_runs_read_from_the_summary(self):
+        self.assertIn("The 7 with old says: one", self.lines)
+        self.assertNotIn("says", self.lines)
+
+    def test_edited_message_says_edited_once(self):
+        self.assertIn("fixed it (edited)", self.lines)
+        self.assertNotIn("Edited Today at 12:23 pm", self.lines)
+
+    def test_thread_button_follows_the_text(self):
+        self.assertEqual(self.after("start here", 2), ["start here", "Thread Plans 1 Message ›"])
+
+    def test_inbox_author_is_not_the_role_icon(self):
+        buf = pb.build(fx.inboxRoleIconScreen())
+        self.assertIn("Dee, 10:09 am", fx.lines(buf))
+
+    def test_hover_toolbar_left_out(self):
+        self.assertNotIn("Click to react with thumbsup", self.lines)
+        self.assertEqual(self.after("just text", 2)[1], "Bob, 12:12 pm")
 
     def test_self_check_passes(self):
         self.assertEqual(failures(pc.runChecks(fx.formattedScreen(), pc.WINDOW_CLASS)), [])
