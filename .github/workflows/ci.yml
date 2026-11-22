@@ -19,7 +19,14 @@ jobs:
       # The add-on imports NVDA modules, which don't exist off-device, so we
       # can only check that it parses -- not that it runs.
       - name: Syntax-check the add-on
-        run: python -m compileall -q addon
+        run: python -m compileall -q addon tests tools
+
+      # Browse mode for the Phoenix client, against recorded Discord tree
+      # shapes and stand-ins for NVDA: how messages, friends and members read,
+      # landmarks, the caret across rebuilds, and that the self-check notices
+      # when Discord moves things.
+      - name: Run the tests
+        run: python -m unittest discover -s tests -v
 
       # Catches a missing entry on the PR rather than after the merge, where it
       # would fail the release job instead.

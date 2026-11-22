@@ -214,8 +214,8 @@ def isPhoenixRoot(obj):
         return False
 
 
-def fetchBuffer(hwnd):
-    """Fetch the window's whole UIA tree in one call and flatten it. Any thread."""
+def fetchRaw(hwnd):
+    """Fetch the window's whole UIA tree in one call, as RawNodes. Any thread."""
     handler = UIAHandler.handler
     request = handler.baseCacheRequest.clone()
     pb.addCacheProperties(request)
@@ -223,7 +223,12 @@ def fetchBuffer(hwnd):
     # The base request uses the control view; take everything.
     request.TreeFilter = handler.clientObject.RawViewCondition
     element = handler.clientObject.ElementFromHandleBuildCache(hwnd, request)
-    return pb.build(pb.rawTreeFromCachedElement(element))
+    return pb.rawTreeFromCachedElement(element)
+
+
+def fetchBuffer(hwnd):
+    """Fetch the window's tree and flatten it. Any thread."""
+    return pb.build(fetchRaw(hwnd))
 
 
 def _runtimeId(obj):

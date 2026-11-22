@@ -157,6 +157,7 @@ _WORD_RE = re.compile(r"\w+", re.UNICODE)
 _LIST_MARKER_RE = re.compile(r"^(\d+[.)]|[a-z][.)]|[•◦▪‣-])$")
 # The clan tag Discord appends to names everywhere ("Alex Server Tag: ABCD").
 _SERVER_TAG_RE = re.compile(r"\s*Server Tag: [^\s,]+")
+_ICON_SUFFIX_RE = re.compile(r", [^,]* icon$", re.IGNORECASE)
 MESSAGE_ACTIONS_NAME = "message actions"
 JUMP_TO_REPLY_NAME = "jump to reply"
 # Window controls Phoenix draws as children of the window itself (automation
@@ -453,7 +454,11 @@ class _Builder(object):
                 # Only text inside (a DM link's status, the profile button's
                 # user name): fold it into the one line, so moving by line
                 # doesn't say "button" once per detail.
-                self.emit(node, self.foldedText(raw, _stripServerTag(name), node) or " ")
+                label = _stripServerTag(name)
+                if role == "link":
+                    # "general (text channel), Text icon": the icon is decoration.
+                    label = _ICON_SUFFIX_RE.sub("", label)
+                self.emit(node, self.foldedText(raw, label, node) or " ")
                 node.end = self.length
                 return self._finish(node, parent, role, depth)
             else:

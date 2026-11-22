@@ -24,7 +24,12 @@ the same commit that bumps the version.
   and Enter to open DMs, links, servers and tabs. Friends, members, DMs and
   activity cards are one line each, and repeated labels, server tags and
   tooltips don't clutter the reading. Moving up past the oldest loaded message
-  loads older ones, as in the Electron client, without moving the mouse. It keeps up with Discord while you
+  loads older ones, as in the Electron client, without moving the mouse.
+- **NVDA+Ctrl+Shift+F11 checks the new client after a Discord update.** It
+  tests everything browse mode relies on in the open window (regions, the
+  message list, how messages and replies are built, the member list, the
+  Friends page, and the rendered document), says how many checks passed and
+  which failed, and saves a report to the Downloads folder. It keeps up with Discord while you
   read, without moving you off the message you are on. NVDA+F5 refreshes it,
   Alt+V reads the message at the browse mode cursor, and it can be turned off
   in the add-on's settings.

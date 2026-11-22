@@ -213,6 +213,26 @@ Preferences, then Input Gestures.</p>
 screen when you pressed the key. Read through it, or remove anything private,
 before sharing it publicly.</p>
 
+<h2>Checking the add-on after a Discord update</h2>
+
+<p>Discord changes its app often, and a change can quietly break part of browse
+mode in the new client, such as messages losing their headings or a region no
+longer being a landmark. <strong>NVDA+Ctrl+Shift+F11</strong> checks
+everything the add-on relies on in the open Discord window: the window itself,
+the server, channel and direct message lists, your user area, the
+conversation and how each message is built, replies, the message box, the
+member list and the Friends page. It also builds the browse mode document and
+checks the result.</p>
+
+<p>NVDA then says how many checks passed, names the first one that failed, and
+saves a full report to your Downloads folder as
+<code>discord_phoenix_check.txt</code>. Open a channel or direct message first,
+and show the member list, so the most checks can run; checks for parts that
+aren't on screen are skipped, not failed. The report contains no message text,
+but it does name the channel or direct message you have open. If something
+fails after a Discord update, attaching the report to a bug report shows
+exactly what moved.</p>
+
 <h2>Licence</h2>
 
 <p>Copyright (C) Khai. This add-on is free software, released under the GNU

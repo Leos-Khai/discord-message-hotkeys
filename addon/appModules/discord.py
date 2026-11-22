@@ -12,6 +12,7 @@
 #   Ctrl+Shift+Z -> move focus to the message box, or the first friend on the Friends page
 #   Ctrl+Shift+X -> move focus to the user status and settings area (bottom left)
 #   NVDA+Ctrl+Shift+F10 -> write a structure dump to the Downloads folder (debug)
+#   NVDA+Ctrl+Shift+F11 -> self-check the new (Phoenix) client; report to Downloads
 #
 # Named "discord.py" so NVDA auto-loads it for the "Discord.exe" process.
 #
@@ -57,6 +58,11 @@ try:
 except Exception:  # pragma: no cover
     log.error("Discord: Phoenix browse mode unavailable", exc_info=True)
     _phoenixBrowseMode = None
+try:
+    from . import _phoenixChecks
+except Exception:  # pragma: no cover
+    log.error("Discord: Phoenix self-check unavailable", exc_info=True)
+    _phoenixChecks = None
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -1550,6 +1556,42 @@ class AppModule(appModuleHandler.AppModule):
         except Exception as e:
             log.error("Discord dump failed", exc_info=True)
             ui.message("Could not save the dump: %s" % e)
+
+    @script(
+        description=(
+            "Discord self-check: test what the add-on relies on in the new (Phoenix) client,"
+            " and save a report to the Downloads folder"
+        ),
+        gesture="kb:NVDA+control+shift+f11",
+    )
+    def script_phoenixSelfCheck(self, gesture):
+        if _phoenixBrowseMode is None or _phoenixChecks is None:
+            ui.message("The self-check is not available in this NVDA version.")
+            return
+        import ctypes
+        import winUser
+        hwnd = self._safe(lambda: api.getForegroundObject().windowHandle)
+        if not hwnd or winUser.getClassName(hwnd) != _phoenixChecks.WINDOW_CLASS:
+            hwnd = ctypes.windll.user32.FindWindowW(_phoenixChecks.WINDOW_CLASS, None)
+        if not hwnd:
+            ui.message("The new Discord client is not running, so there is nothing to check.")
+            return
+        try:
+            raw = _phoenixBrowseMode.fetchRaw(hwnd)
+            checks = _phoenixChecks.runChecks(raw, winUser.getClassName(hwnd))
+            text = _phoenixChecks.report(checks, "Discord Phoenix self-check, %s\nWindow: %s"
+                                         % (time.strftime("%Y-%m-%d %H:%M:%S"), raw.name))
+            path = os.path.join(self._downloadsDir(), "discord_phoenix_check.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text + "\n")
+        except Exception as e:
+            log.error("Discord: Phoenix self-check failed", exc_info=True)
+            ui.message("The self-check could not run: %s" % e)
+            return
+        # The report holds no message text, only structure - though it does name
+        # the open channel or DM and the window title.
+        ui.message("Self-check: %s. Report saved to Downloads as discord_phoenix_check.txt"
+                   % _phoenixChecks.spokenSummary(checks))
 
     BROWSE_DUMP_LINE_CAP = 400
 
