@@ -120,7 +120,52 @@ class EveryScreen(unittest.TestCase):
         ("profile", fx.profileCardScreen, {}),
         ("inbox", fx.inboxScreen, {}),
         ("menu", fx.contextMenuScreen, {}),
+        ("voice", fx.voiceScreen, {}),
+        ("voiceChat", fx.voiceScreen, {"withChat": True}),
+        ("stage", fx.stageScreen, {}),
+        ("stage", fx.stageScreen, {"withChat": True}),
+        ("serverSettings", fx.serverSettingsScreen, {}),
+        ("channelSettings", fx.channelSettingsScreen, {}),
+        ("modal", fx.pinnedPopupScreen, {}),
+        ("events", fx.eventsScreen, {}),
+        ("serverMembers", fx.serverMembersScreen, {}),
+        ("browseChannels", fx.browseChannelsScreen, {}),
+        ("serverBoosts", fx.serverBoostsScreen, {}),
     ]
+
+    def test_building_does_not_change_the_tree(self):
+        # The self-check reads the same tree after building it; a second build
+        # (a refresh) must read the same.
+        for kind, make, kw in self.SCREENS:
+            with self.subTest(screen=kind, **kw):
+                raw = make(**kw)
+                first = pb.build(raw).text
+                self.assertEqual(pc.detectScreen(raw).kind, kind)
+                self.assertEqual(pb.build(raw).text, first)
+
+    def test_nameless_call_buttons_take_their_label(self):
+        buf = pb.build(fx.voiceScreen())
+        for label, role in (("Turn On Camera", "toggleButton"), ("Share Your Screen", "toggleButton"),
+                            ("Start An Activity", "button")):
+            node = buf.nodeAt(buf.text.index(label))
+            self.assertEqual((node.label, node.role), (label, role))
+
+    def test_call_text_chats_are_the_conversation(self):
+        for make in (fx.voiceScreen, fx.stageScreen):
+            with self.subTest(make=make.__name__):
+                found = landmarks(pb.build(make(withChat=True)))
+                self.assertTrue(any(l == "main" and n.startswith("Text chat for ") for n, l in found), found)
+
+    def test_settings_sidebars_are_navigation(self):
+        self.assertIn(("Server settings pages", "navigation"), landmarks(pb.build(fx.serverSettingsScreen())))
+        self.assertIn(("Settings pages", "navigation"), landmarks(pb.build(fx.channelSettingsScreen())))
+        self.assertEqual([n for n, l in landmarks(pb.build(fx.serverSettingsScreen())) if l == "main"],
+                         ["Server Settings"])
+
+    def test_popup_over_a_page_is_a_region(self):
+        found = landmarks(pb.build(fx.pinnedPopupScreen()))
+        self.assertIn(("Pinned Messages", "region"), found)
+        self.assertEqual([n for n, l in found if l == "main"], ["general (channel)"])
     # A context menu is not a page: NVDA uses focus mode in it, and it has no landmarks.
     WITHOUT_MAIN = ("menu",)
 

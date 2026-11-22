@@ -180,6 +180,32 @@ LABEL_LOOKAHEAD = 3
 SETTINGS_SIDEBAR_NAME = "settings sidebar"
 
 
+SERVER_SETTINGS_PAGES = frozenset(("audit log", "manage roles", "server profile"))
+SERVER_SETTINGS_SIDEBAR_NAME = "Server settings pages"
+SETTINGS_PAGES_NAME = "Settings pages"
+
+
+def serverSettingsSidebar(modal):
+    """Server Settings' sidebar: an unnamed grouping of tab lists, one per section.
+
+    Server Settings (2026-11-22): WINDOW "" > GROUPING "" > TAB "My
+    Server" > TABITEM "Server Profile", ..., TAB "People" > "Members", ...
+    """
+    for ch in modal.children:
+        if ch.controlType == CT_GROUP and not ch.name and ch.children \
+                and all(k.controlType == CT_TAB for k in ch.children):
+            return ch
+    return None
+
+
+def isServerSettings(modal):
+    sidebar = serverSettingsSidebar(modal)
+    if sidebar is None:
+        return False
+    pages = set(_norm(t.name or "") for tab in sidebar.children for t in tab.children)
+    return bool(pages & SERVER_SETTINGS_PAGES)
+
+
 def modalName(raw):
     """A name for a modal window: its own, else "Settings", else its first heading."""
     if raw.name:
@@ -187,6 +213,8 @@ def modalName(raw):
     for ch in raw.children:
         if ch.controlType == CT_GROUP and _norm(ch.name or "") == SETTINGS_SIDEBAR_NAME:
             return "Settings"
+    if isServerSettings(raw):
+        return "Server Settings"
     for ch in raw.children:
         if ch.controlType == CT_TEXT and ch.headingLevel and ch.name:
             return cleanText(ch.name)
@@ -228,7 +256,7 @@ class RawNode(object):
         "offscreen", "toggleState", "selected", "expandState", "headingLevel",
         "hasInvoke", "hasToggle", "hasSelectionItem", "hasExpandCollapse",
         "hasValue", "valueReadOnly", "runtimeId", "element", "children",
-        "landmarkHint",
+        "landmarkHint", "nameHint",
     )
 
     def __init__(self, controlType=0, name="", value=None, focusable=False, focused=False,
@@ -259,6 +287,15 @@ class RawNode(object):
         # For a grouping the builder made up (a section with no container in
         # the tree): the landmark it should be.
         self.landmarkHint = None
+        # A name the builder gives an element for reading (a nameless button's
+        # label text). Kept apart from name, so building never changes the tree.
+        self.nameHint = None
+
+
+def displayName(raw):
+    """What an element is called in the document: the builder's name for it, else its own."""
+    hint = getattr(raw, "nameHint", None)
+    return hint if hint is not None else (raw.name or "")
 
 
 class Node(object):
@@ -338,7 +375,7 @@ def landmarkFor(name, depth, inMainPane=True):
     if lower.startswith("members list for") or lower.endswith("'s profile") \
             or lower.endswith("(thread)"):
         return "complementary"
-    if lower.endswith("(channel)") or lower.startswith("text chat for voice channel"):
+    if lower.endswith("(channel)") or lower.startswith(("text chat for voice channel", "text chat for stage channel")):
         return "main"
     if lower.endswith("(server)") or lower == "private channels" or lower.endswith("sidebar") \
             or lower == "breadcrumb":
@@ -408,6 +445,8 @@ class _Builder(object):
         # (runtimeId, node) for elements merged into an ancestor's line, so
         # focus landing on one still finds its place.
         self.folded = []
+        # (runtimeId of a label text, raw of the control it now names).
+        self.labelledBy = []
 
     def rawText(self, raw):
         """Every name and value in raw's subtree, normalised - for coverage tests."""
@@ -451,7 +490,7 @@ class _Builder(object):
         role = semanticRole(raw)
         node = Node(raw, role, parent, depth)
         node.start = self.length
-        name = cleanText(raw.name)
+        name = cleanText(displayName(raw))
         node.label = name
         self._setStates(node)
         childContext = context
@@ -545,9 +584,18 @@ class _Builder(object):
                 # A modal (Settings, a full profile) is a window inside the
                 # window; while it is open the main pane is empty. The modal is
                 # the page: one main landmark.
-                node.landmark = "main"
+                # Most modals empty the main pane; a popup that leaves the page
+                # showing (Pinned Messages) is a region beside its main.
+                pageShowing = any(c.controlType == CT_PANE and c.children for c in parent.raw.children)
+                node.landmark = "region" if pageShowing else "main"
                 node.fieldName = modalName(raw)
                 node.alwaysReportName = True
+                sidebar = serverSettingsSidebar(raw)
+                if sidebar is not None:
+                    # Server and Channel Settings: the page list is navigation.
+                    sidebar.nameHint = SERVER_SETTINGS_SIDEBAR_NAME if isServerSettings(raw) \
+                        else SETTINGS_PAGES_NAME
+                    sidebar.landmarkHint = "navigation"
             inMainPane = parent is not None and parent.role == "pane" and parent.depth == 1
             if not isTreeRoot and name:
                 # Focusable groupings are cards (a quest, a message), not regions;
@@ -588,7 +636,7 @@ class _Builder(object):
         if depth == 1 and role == "pane":
             children = self._sections(raw)
         else:
-            children = self._labelledControlsFirst(children, skip)
+            children = self._labelledControlsFirst(self._labelUnnamedControls(children, skip), skip)
 
         # Children. Text that only repeats a recent sibling ("Server Two"
         # beside the server item "2 mentions, Server Two", or a friend's
@@ -602,7 +650,7 @@ class _Builder(object):
         # the message toolbar, and the composer's buttons after the message box.
         lowerName = name.lower()
         tooltipZone = lowerName == MESSAGE_ACTIONS_NAME
-        isConversation = lowerName.endswith("(channel)") or lowerName.startswith("text chat for voice channel")
+        isConversation = lowerName.endswith("(channel)") or lowerName.startswith(("text chat for voice channel", "text chat for stage channel"))
         for ch in children:
             if ch.controlType == CT_TITLEBAR:
                 continue  # the OS title bar's System / Minimize / Close
@@ -616,7 +664,7 @@ class _Builder(object):
                 self.foldSubtree(ch, node)
                 continue
             chRole = semanticRole(ch)
-            if chRole in CONTROL_ROLES and chRole != "edit" and not cleanText(ch.name) \
+            if chRole in CONTROL_ROLES and chRole != "edit" and not cleanText(displayName(ch)) \
                     and not ch.children and not (isinstance(ch.value, str) and ch.value):
                 self.foldSubtree(ch, node)  # an unlabelled, empty button says only "button"
                 continue
@@ -637,8 +685,8 @@ class _Builder(object):
                 continue
             preview = None
             if chRole in CONTROL_ROLES and not self.hasControlDescendant(ch):
-                preview = _norm(self.foldedText(ch, _stripServerTag(cleanText(ch.name)), None))
-                chName = _norm(cleanText(ch.name))
+                preview = _norm(self.foldedText(ch, _stripServerTag(cleanText(displayName(ch))), None))
+                chName = _norm(cleanText(displayName(ch)))
                 # Inside a control (an Active Now card), same-named buttons are
                 # one action shown several ways; elsewhere only exact repeats.
                 same = [n for (line, n) in recentControls
@@ -711,6 +759,10 @@ class _Builder(object):
             # heading or text (for a menu).
             for r in run:
                 if r.controlType == CT_LIST and r.name:
+                    return cleanText(r.name)
+            for r in run:
+                # A page's own top heading: "Voice Channel General".
+                if r.controlType == CT_TEXT and r.headingLevel == 1 and r.name:
                     return cleanText(r.name)
             if preferTitle and title:
                 return title
@@ -904,6 +956,33 @@ class _Builder(object):
                 self.foldSubtree(ch, jumpNode)
         return jumpNode
 
+    def _labelUnnamedControls(self, children, skip):
+        """Give a nameless button the text beside it as its label.
+
+        The in-call controls (2026-11-22): BUTTON (toggle) "", TEXT "Turn On
+        Camera", BUTTON (toggle) "", TEXT "Share Your Screen", TEXT "Start An
+        Activity", BUTTON "". The text is the button's visible label; without
+        it the button says only "button", and the text can't be pressed.
+        Prefer the text after the button, then the one before it.
+        """
+        used = set()
+        for i, ch in enumerate(children):
+            if semanticRole(ch) not in CONTROL_ROLES or semanticRole(ch) == "edit" \
+                    or cleanText(displayName(ch)) or ch.children:
+                continue
+            for j in (i + 1, i - 1):
+                if 0 <= j < len(children):
+                    label = children[j]
+                    if label.controlType == CT_TEXT and not label.children and cleanText(label.name) \
+                            and id(label) not in used:
+                        ch.nameHint = label.name
+                        used.add(id(label))
+                        skip.add(id(label))
+                        if label.runtimeId:
+                            self.labelledBy.append((label.runtimeId, ch))
+                        break
+        return children
+
     def _labelledControlsFirst(self, children, skip):
         """Put a control where its separate label was, and drop the label.
 
@@ -949,7 +1028,7 @@ class _Builder(object):
             if len(_norm(rest)) > 3:
                 # "Account Age Sequoia. 7 years, 2 months" after the "Account
                 # Age" badge: the label repeats, the rest is the badge's detail.
-                raw.name = rest
+                raw.nameHint = rest
                 return False
         if not echoes and not prevNode.description:
             prevNode.description = text  # NVDA says it on B, Tab and focus
@@ -1126,7 +1205,18 @@ class _Builder(object):
 
 
 def build(rawRoot):
-    """Flatten a RawNode tree into a Buffer."""
+    """Flatten a RawNode tree into a Buffer.
+
+    The builder notes names and landmarks on the tree as it goes (a nameless
+    button's label, "this grouping is main"); clear any left by an earlier
+    build of the same tree, so every build reads the tree as Discord gave it.
+    """
+    stack = [rawRoot]
+    while stack:
+        r = stack.pop()
+        r.nameHint = None
+        r.landmarkHint = None
+        stack.extend(r.children)
     builder = _Builder()
     buf = Buffer(None)
     builder.buf = buf
@@ -1147,6 +1237,10 @@ def build(rawRoot):
         order.extend(reversed(chain))
     for rid, n in builder.folded:
         buf.byRuntimeId[rid] = n
+    controls = dict((id(n.raw), n) for n in order)
+    for rid, raw in builder.labelledBy:
+        if id(raw) in controls:
+            buf.byRuntimeId[rid] = controls[id(raw)]
     for n in order:
         n.index = len(buf.nodes)
         buf.nodes.append(n)

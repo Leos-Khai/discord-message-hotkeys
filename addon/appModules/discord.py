@@ -376,7 +376,8 @@ class AppModule(appModuleHandler.AppModule):
         # A forum post opens beside the post list as "<post> (thread)", with its
         # own message list.
         return ((name.endswith(CHANNEL_LANDMARK_SUFFIX) and not name.startswith("members list for"))
-                or name.startswith("text chat for voice channel") or name.endswith("(thread)"))
+                or name.startswith(("text chat for voice channel", "text chat for stage channel"))
+                or name.endswith("(thread)"))
 
     def _findMessagesList(self):
         if self._listStillValid(self._cachedList):
@@ -1277,10 +1278,10 @@ class AppModule(appModuleHandler.AppModule):
         place, _ = self._titleParts()
         # A voice channel's chat leaves the title on the last text channel.
         anchor = self._findInWindow(self._isChannelAnchor, maxDepth=CHANNEL_SEARCH_DEPTH)
-        voicePrefix = "Text chat for voice channel "
         anchorName = (self._name(anchor) or "") if anchor is not None else ""
-        if anchorName.startswith(voicePrefix):
-            place = anchorName[len(voicePrefix):].strip()
+        for callPrefix in ("Text chat for voice channel ", "Text chat for stage channel "):
+            if anchorName.startswith(callPrefix):
+                place = anchorName[len(callPrefix):].strip()
         first = None
         for link in self._listLinks(listObj):
             name = self._name(link) or ""

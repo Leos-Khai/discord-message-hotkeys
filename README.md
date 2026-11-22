@@ -17,7 +17,11 @@ from its UI Automation tree. Three things keep that working as Discord changes:
   client (Friends tabs, DMs, channels, a forum and its thread, Discover,
   Quests, Shop, Nitro, Message Requests, Settings, Inbox) and checks each one.
   Run it after a Discord update. It only opens things; it skips voice and stage
-  channels and marks the channels it opens as read.
+  channels and marks the channels it opens as read. With `--server "<a server
+  you own for testing>"` it also covers that server's voice channel (joining
+  and leaving it), stage, Members, Browse Channels, Server Boosts, Events,
+  server menu, Server Settings, Channel Settings and channel popups;
+  `--server-only` skips the rest.
 
 The tools need Windows, Python 3 and `pip install comtypes`. When Discord's
 tree changes, update the shapes in `tests/phoenix_fixtures.py` together with

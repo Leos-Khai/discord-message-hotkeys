@@ -15,6 +15,15 @@ types, sends, reacts or changes a setting, and it skips voice and stage
 channels (opening one joins it). It does mark the channels it opens as read.
 Popups (Settings, Inbox) are closed with Escape. Exit status 1 if any screen
 has a failure.
+
+    python tools/phoenix_tour.py --server "My Test Server"
+
+also visits that server's call and admin screens: a voice channel (joined,
+then its text chat, then Disconnect), a stage channel (joined, then Disconnect
+Quietly), Members, Browse Channels, Server Boosts, Events, the server menu,
+Server Settings, Channel Settings, and the channel header's Threads, Pinned
+Messages and Notification Settings popups. Use a server you own for testing;
+it skips the calls if you are already in one.
 """
 import ctypes
 import ctypes.wintypes as wintypes
@@ -239,11 +248,96 @@ def tour():
     return results
 
 
+def dismissCallSurvey():
+    """After a call Discord may ask "How'd the call go?" in a modal: close it without rating."""
+    raw, shown = waitFor(lambda raw: find(raw, lambda r: r.controlType == 50032
+                                          and "call go" in (r.name or "").lower()) is not None, timeout=3.0)
+    if shown:
+        postKey(0x1B)
+
+
+def isInCall(raw):
+    return find(raw, lambda r: r.controlType == 50000 and r.name in ("Disconnect", "Disconnect Quietly")) is not None
+
+
+def serverTour(results, server):
+    """Voice, stage and server-admin screens, on a server you own for testing."""
+    if isInCall(tree()):
+        print("You are in a call: skipping voice and stage, so as not to move you out of it.")
+        joinCalls = False
+    else:
+        joinCalls = True
+    if not openItem(named(server), lambda raw: find(raw, contains("(server)")) is not None) \
+            and not press(contains(server), SELECT):
+        print("Couldn't open the server %r" % server)
+        return
+    raw = tree()
+
+    def channelNamed(kind):
+        # "<name> (<kind> channel)", without what Discord appends while a call is
+        # active (", <who is in it>, call duration ...", ", Open Chat").
+        r = find(raw, lambda r: "(%s channel)" % kind in (r.name or ""))
+        return r.name.split(" (%s channel)" % kind)[0] + " (%s channel)" % kind if r is not None else None
+
+    text = channelNamed("text")
+    if text and press(startswith(text), INVOKE):
+        checkHere(results, "Test server: text channel", "channel")
+        for popup, label in (("Threads", "Threads popup"), ("Pinned Messages", "Pinned Messages popup"),
+                             ("Notification Settings", "Notification menu")):
+            if postClick(named(popup)):
+                checkHere(results, "Test server: " + label)
+                postKey(0x1B)
+        if press(named("Edit Channel"), INVOKE):
+            checkHere(results, "Test server: Channel Settings", "channelSettings")
+            postKey(0x1B)
+    for page, expect in (("Members", "serverMembers"), ("Browse Channels", "browseChannels"),
+                         ("Server Boosts", "serverBoosts"), ("Events", "events")):
+        if press(named(page), INVOKE):
+            checkHere(results, "Test server: " + page, expect)
+            if expect == "events":
+                postKey(0x1B)
+    if postClick(lambda r: (r.name or "").startswith("%s, server actions" % server)):
+        checkHere(results, "Test server: server menu", "menu")
+        if press(named("Server Settings"), INVOKE):
+            checkHere(results, "Test server: Server Settings", "serverSettings")
+        postKey(0x1B)
+    if not joinCalls:
+        return
+    voice = channelNamed("voice")
+    if voice and press(startswith(voice), INVOKE):
+        press(startswith(voice), INVOKE)  # a second press opens the call view
+        checkHere(results, "Test server: voice channel", "voice")
+        if press(named("Show Chat"), INVOKE):
+            checkHere(results, "Test server: voice channel chat", "voiceChat")
+        press(named("Disconnect"), INVOKE)
+        waitFor(lambda raw: not isInCall(raw))
+        dismissCallSurvey()
+    stage = channelNamed("stage")
+    if stage and press(startswith(stage), INVOKE):
+        press(named("Got it!"), INVOKE)  # the first-time "Welcome to Stages!" dialog
+        checkHere(results, "Test server: stage channel", "stage")
+        if press(named("Show Chat"), INVOKE):
+            checkHere(results, "Test server: stage channel chat", "stage")
+        press(named("Disconnect Quietly"), INVOKE)
+        waitFor(lambda raw: not isInCall(raw))
+        dismissCallSurvey()
+    if isInCall(tree()):
+        print("WARNING: still connected to a call - disconnect in Discord")
+
+
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Visit every kind of Phoenix screen and self-check each one.")
+    parser.add_argument("--server", help="a server of yours to test voice, stage and server settings on "
+                                         "(joins and leaves its voice and stage channels)")
+    parser.add_argument("--server-only", action="store_true", help="with --server, only visit that server")
+    args = parser.parse_args()
     if not hwnd():
         print("No %s window: is the new Discord client running?" % pc.WINDOW_CLASS)
         return 2
-    results = tour()
+    results = [] if (args.server and args.server_only) else tour()
+    if args.server:
+        serverTour(results, args.server)
     bad = [label for label, _, checks in results if any(c.status == pc.FAIL for c in checks)]
     print("\n%d screens checked, %d with failures%s" % (len(results), len(bad), (": " + ", ".join(bad)) if bad else ""))
     return 1 if bad else 0

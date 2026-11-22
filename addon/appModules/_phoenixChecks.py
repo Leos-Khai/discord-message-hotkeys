@@ -30,6 +30,8 @@ SCREENS = {
     "announcement": "announcement channel",
     "forum": "forum channel",
     "voiceChat": "voice channel chat",
+    "voice": "voice channel",
+    "stage": "stage channel",
     "dm": "direct message",
     "groupDm": "group direct message",
     "friends": "Friends page",
@@ -41,6 +43,12 @@ SCREENS = {
     "settings": "Settings",
     "profile": "user profile",
     "inbox": "Inbox",
+    "serverSettings": "Server Settings",
+    "events": "server events",
+    "channelSettings": "Channel Settings",
+    "serverMembers": "server Members page",
+    "browseChannels": "Browse Channels",
+    "serverBoosts": "Server Boosts",
     "menu": "context menu",
     "modal": "dialog",
     "unknown": "unrecognised screen",
@@ -63,6 +71,9 @@ TITLE_KINDS = {
     "shop": "shop",
     "nitro": "nitro",
     "message requests": "messageRequests",
+    "members": "serverMembers",
+    "browse channels": "browseChannels",
+    "server boosts": "serverBoosts",
 }
 
 
@@ -124,7 +135,7 @@ def _isConversation(r):
     lower = _lower(r)
     return r.controlType == pb.CT_GROUP and (
         (lower.endswith("(channel)") and not lower.startswith("members list for"))
-        or lower.startswith("text chat for voice channel"))
+        or lower.startswith(("text chat for voice channel", "text chat for stage channel")))
 
 
 def _child(raw, controlType=None, name=None, pred=None):
@@ -158,6 +169,12 @@ def detectScreen(raw):
             screen.kind = "profile"
         elif _lower(modal) == "inbox":
             screen.kind = "inbox"
+        elif pb.isServerSettings(modal):
+            screen.kind = "serverSettings"
+        elif _lower(modal) == "events":
+            screen.kind = "events"
+        elif _lower(modal) == "channel settings":
+            screen.kind = "channelSettings"
         screen.modal, screen.pane = modal, pane
         return screen
     screen = Screen("unknown")
@@ -172,8 +189,18 @@ def detectScreen(raw):
                            and _lower(c).startswith("members list for")), None)
     screen.profilePanel = next((c for c in top if c.controlType == pb.CT_GROUP
                                 and _lower(c).endswith("'s profile")), None)
+    callHeading = next((c for c in top if c.controlType == pb.CT_TEXT and c.headingLevel == 1
+                        and _lower(c).startswith(("voice channel ", "stage channel "))), None)
+    # A stage's view (2026-11-22) has no "Stage Channel ..." heading, but a
+    # "Stage Channel" button beside the channel name, and Disconnect Quietly.
+    stageView = any(c.controlType == pb.CT_BUTTON and c.name in ("Stage Channel", "Disconnect Quietly")
+                    for c in top)
     if screen.conversation is not None and _lower(screen.conversation).startswith("text chat for voice channel"):
         screen.kind = "voiceChat"
+    elif stageView:
+        screen.kind = "stage"
+    elif callHeading is not None:
+        screen.kind = "stage" if _lower(callHeading).startswith("stage") else "voice"
     elif screen.header is not None:
         first = _child(screen.header, pb.CT_TEXT)
         kind = HEADER_KINDS.get(_lower(first) if first is not None else "")
@@ -182,9 +209,16 @@ def detectScreen(raw):
             kind = "groupDm"
         screen.kind = kind or ("channel" if screen.conversation is not None else "unknown")
     else:
+        # The page's title: the main pane's first text, the window title
+        # ("Members | Server - Discord", "Browse Channels - Server - Discord"),
+        # or the page's top heading ("Server Boosts").
         title = _child(pane, pb.CT_TEXT, pred=lambda c: bool(c.name))
-        kinds = [TITLE_KINDS.get(_lower(title)) if title is not None else None,
-                 TITLE_KINDS.get((raw.name or "").rsplit(" - Discord", 1)[0].strip().lower())]
+        windowTitle = (raw.name or "").rsplit(" - Discord", 1)[0].strip().lower()
+        heading = next((c for c in top if c.controlType == pb.CT_TEXT and c.headingLevel == 1 and c.name), None)
+        candidates = [_lower(title) if title is not None else "", windowTitle,
+                      windowTitle.split(" | ", 1)[0], windowTitle.split(" - ", 1)[0],
+                      _lower(heading) if heading is not None else ""]
+        kinds = [TITLE_KINDS.get(t) for t in candidates if t]
         screen.kind = next((k for k in kinds if k), "unknown")
         if screen.kind == "unknown" and next((c for c in top if c.controlType == pb.CT_GROUP
                                               and c.name == "Friends"), None) is not None:
@@ -370,6 +404,47 @@ def _checkGroupDm(c, screen):
 
 def _checkVoiceChat(c, screen):
     _composer(c, screen.conversation, "Voice channel chat", required=False)
+    _checkCallControls(c, screen, "Voice channel chat")
+
+
+def _checkCall(c, screen):
+    label = screen.label[0].upper() + screen.label[1:]
+    heading = next((r for r in screen.top if r.controlType == pb.CT_TEXT and r.headingLevel == 1), None)
+    c.add("%s: a top heading" % label, heading is not None,
+          (heading.name if heading is not None else "") + "; names the main landmark")
+    _checkCallControls(c, screen, label)
+    if screen.conversation is not None:
+        c.skip("%s: Show Chat button" % label, "the chat is already open")
+    else:
+        c.add("%s: Show Chat button" % label,
+              any(r.controlType == pb.CT_BUTTON and r.name in ("Show Chat", "Hide Chat") for r in screen.top),
+              "opens the channel's text chat", warnOnly=True)
+    if screen.kind == "voice":
+        tiles = [r for r in screen.top if r.controlType == pb.CT_BUTTON and _lower(r).startswith("call tile")]
+        c.add("%s: a call tile for each person" % label, len(tiles) > 0, "%d tiles" % len(tiles), warnOnly=True)
+    else:
+        c.add("%s: speaker and audience counts" % label,
+              any(r.controlType == pb.CT_TEXT and _lower(r).endswith("in audience") for r in screen.top), "",
+              warnOnly=True)
+
+
+def _checkCallControls(c, screen, label):
+    # The in-call controls, in the user area while connected.
+    user = next((r for r in screen.top if r.controlType == pb.CT_GROUP
+                 and r.name == "User status and settings"), None)
+    # A voice call has Disconnect in the user area; a stage, Disconnect Quietly
+    # in its own view.
+    disconnect = any(_find(part, lambda r: r.controlType == pb.CT_BUTTON
+                           and r.name in ("Disconnect", "Disconnect Quietly")) is not None
+                     for part in screen.top)
+    c.add("%s: Disconnect button" % label, disconnect, "shown while you are connected",
+          warnOnly=screen.kind == "voiceChat")
+    if user is not None:
+        unnamed = [r for r in user.children if r.controlType == pb.CT_BUTTON and not r.name]
+        labels = [r for r in user.children if r.controlType == pb.CT_TEXT and r.name]
+        c.add("%s: nameless call buttons have a label text beside them" % label,
+              len(labels) >= len(unnamed), "%d nameless buttons, %d label texts" % (len(unnamed), len(labels)),
+              warnOnly=True)
 
 
 def _checkFriends(c, screen):
@@ -431,6 +506,24 @@ def _checkMessageRequests(c, screen):
           "requests" in tabs and any(t.startswith("spam") for t in tabs), ", ".join(tabs))
 
 
+def _checkServerMembers(c, screen):
+    table = next((r for r in screen.top if r.controlType == pb.CT_TABLE), None)
+    c.add("Members page: members table", table is not None, table.name if table is not None else "")
+    c.add("Members page: search box", any(r.controlType == pb.CT_EDIT for r in screen.top), "", warnOnly=True)
+
+
+def _checkBrowseChannels(c, screen):
+    channels = _findAll(screen.pane, lambda r: r.controlType == pb.CT_BUTTON and any(
+        k.controlType == pb.CT_TEXT and _lower(k).startswith("active ") for k in _walk(r)))
+    c.add("Browse Channels: channels are buttons 'name, Active ...'", len(channels) > 0,
+          "%d channels" % len(channels), warnOnly=True)
+
+
+def _checkServerBoosts(c, screen):
+    c.add("Server Boosts: 'Boost This Server' button",
+          _find(screen.pane, lambda r: r.controlType == pb.CT_BUTTON and r.name == "Boost This Server") is not None, "")
+
+
 SCREEN_CHECKS = {
     "channel": _checkChannel,
     "announcement": _checkAnnouncement,
@@ -438,12 +531,17 @@ SCREEN_CHECKS = {
     "dm": _checkDm,
     "groupDm": _checkGroupDm,
     "voiceChat": _checkVoiceChat,
+    "voice": _checkCall,
+    "stage": _checkCall,
     "friends": _checkFriends,
     "discover": _checkDiscover,
     "quests": _checkQuests,
     "shop": _checkShop,
     "nitro": _checkNitro,
     "messageRequests": _checkMessageRequests,
+    "serverMembers": _checkServerMembers,
+    "browseChannels": _checkBrowseChannels,
+    "serverBoosts": _checkServerBoosts,
 }
 
 
@@ -452,7 +550,11 @@ def _checkMembers(c, screen):
         c.skip("Member list", "not shown")
         return
     entries = _findAll(screen.members, lambda r: r.controlType == pb.CT_LISTITEM and r.hasInvoke)
-    c.add("Member list: entries are clickable list items", len(entries) > 0, "%d members" % len(entries))
+    listed = _find(screen.members, lambda r: r.controlType == pb.CT_LIST) is not None
+    # Just after opening, the list is there but still filling in.
+    c.add("Member list: entries are clickable list items", len(entries) > 0,
+          "%d members%s" % (len(entries), "" if entries or not listed else " (still loading?)"),
+          warnOnly=listed and not entries)
 
 
 # -- modals ------------------------------------------------------------------------
@@ -461,8 +563,7 @@ def _checkMenu(c, screen):
     menu = screen.modal
     items = [r for r in menu.children if r.controlType == pb.CT_MENUITEM]
     c.add("Menu: items are menu items", len(items) > 0, "%d items in %r" % (len(items), menu.name))
-    c.add("Menu: the main pane is empty behind it", screen.pane is None or not screen.pane.children,
-          "", warnOnly=True)
+    # A message's menu empties the pane; the server menu drops down over it.
 
 
 def _checkModal(c, screen):
@@ -470,14 +571,26 @@ def _checkModal(c, screen):
         _checkMenu(c, screen)
         return
     modal = screen.modal
-    c.add("Modal: the main pane is empty behind it", screen.pane is None or not screen.pane.children,
-          "while a modal is open the document is the modal alone", warnOnly=True)
-    heading = _child(modal, pb.CT_TEXT, pred=lambda r: r.headingLevel == 1)
-    c.add("Modal: named, or headed by a level 1 heading", heading is not None or bool(modal.name),
+    if screen.pane is None or not screen.pane.children:
+        c.add("Modal: the main pane is empty behind it", True, "the document is the modal alone; it is main")
+    else:
+        c.skip("Modal: the main pane is empty behind it", "a popup over a page still showing; it is a region")
+    heading = _child(modal, pb.CT_TEXT, pred=lambda r: r.headingLevel > 0)
+    c.add("Modal: named, or headed by a heading", heading is not None or bool(modal.name),
           "landmark name: %s" % pb.modalName(modal))
+    if screen.kind in ("serverSettings", "channelSettings"):
+        label = screen.label
+        sidebar = pb.serverSettingsSidebar(modal)
+        pages = [t for t in _findAll(sidebar, lambda r: r.controlType == pb.CT_TABITEM)] if sidebar else []
+        c.add("%s: sidebar is tab lists of pages" % label,
+              len(pages) >= (5 if screen.kind == "serverSettings" else 3),
+              "%d pages" % len(pages))
     if screen.kind == "inbox":
         tabs = [_lower(t) for t in _findAll(modal, lambda r: r.controlType == pb.CT_TABITEM)]
         c.add("Inbox: tabs Unreads, Mentions", "unreads" in tabs and "mentions" in tabs, ", ".join(tabs))
+    if screen.kind == "events":
+        c.add("Events: Create Event button",
+              _find(modal, lambda r: r.controlType == pb.CT_BUTTON and r.name == "Create Event") is not None, "")
     if screen.kind == "settings":
         sidebar = _child(modal, pb.CT_GROUP, "Settings sidebar")
         tabs = _findAll(sidebar, lambda r: r.controlType == pb.CT_TABITEM)
@@ -537,10 +650,16 @@ def _checkDocument(c, raw, screen, buf):
               not any(":" in n.label.split(": ", 1)[-1] for n in menuItems if n.label.startswith("Add Reaction:")),
               "", warnOnly=True)
     elif screen.modal is not None:
-        c.add("Landmarks: the modal is the main landmark", "main" in kinds, detail)
-        if screen.kind == "settings":
-            c.add("Landmarks: Settings sidebar is navigation",
-                  any(n.landmark == "navigation" and n.fieldName == "Settings sidebar" for n in landmarks), detail)
+        popup = screen.pane is not None and bool(screen.pane.children)
+        c.add("Landmarks: the modal is the main landmark, or a region over a page",
+              any(n.raw is screen.modal and n.landmark == ("region" if popup else "main") for n in landmarks), detail)
+        c.add("Landmarks: one main", len([n for n in landmarks if n.landmark == "main"]) == 1,
+              ", ".join(n.fieldName for n in landmarks if n.landmark == "main"))
+        if screen.kind in ("settings", "serverSettings", "channelSettings"):
+            sidebarName = {"settings": "Settings sidebar", "serverSettings": pb.SERVER_SETTINGS_SIDEBAR_NAME,
+                           "channelSettings": pb.SETTINGS_PAGES_NAME}[screen.kind]
+            c.add("Landmarks: the settings sidebar is navigation",
+                  any(n.landmark == "navigation" and n.fieldName == sidebarName for n in landmarks), detail)
     else:
         c.add("Landmarks: banner, navigation and main", set(("banner", "navigation", "main")) <= kinds, detail)
         mains = [n for n in landmarks if n.landmark == "main"]

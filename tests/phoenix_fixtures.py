@@ -424,6 +424,134 @@ def contextMenuScreen():
     ])
 
 
+def _inCall(userArea):
+    """The user area while connected: in-call controls, some nameless with a label text beside them."""
+    userArea.children[:0] = [
+        button("Voice Details"), link("General / Server One"), button("Disconnect"),
+        node(pb.CT_BUTTON, "", focusable=True, hasToggle=True, toggleState=0), text("Turn On Camera"),
+        node(pb.CT_BUTTON, "", focusable=True, hasToggle=True, toggleState=0), text("Share Your Screen"),
+        text("Start An Activity"), button(""),
+    ]
+    return userArea
+
+
+def voiceScreen(withChat=False):
+    """A voice channel's call view, optionally with its text chat open."""
+    _ids[0] = 0
+    pane = sidebars(serverSidebar(channels=["general (text channel)"]))
+    _inCall(pane[6])
+    pane += [
+        text("Voice Channel General", headingLevel=1, children=[text("General")]),
+        button("Show Chat"), button("Mute"), button("Turn On Camera"), button("Disconnect"),
+        node(pb.CT_IMAGE, "Me"), button("Call tile, me_user"), button("Invite to Voice"),
+    ]
+    if withChat:
+        pane += [
+            group("Thread header", [text("General"), button("Close")]),
+            group("Text chat for voice channel General", [
+                text("General chat", headingLevel=2),
+                node(pb.CT_DOCUMENT, "", [node(pb.CT_LIST, "Messages in General", [
+                    node(pb.CT_LISTITEM, "", [text("This is the start of the General channel.")]),
+                ], focusable=True)]),
+                node(pb.CT_EDIT, "Message General", focusable=True),
+            ]),
+        ]
+    return window(pane, title="#general | Server One - Discord")
+
+
+def stageScreen(withChat=False):
+    """A stage channel waiting to start, optionally with its text chat open."""
+    _ids[0] = 0
+    pane = sidebars(serverSidebar(channels=["general (text channel)"]))
+    pane += [
+        text("Waiting for the Stage to start", headingLevel=1),
+        button("Start the Stage", [text("Pick a topic to start the conversation.")]),
+        button("Request to Speak"), button("Disconnect Quietly"),
+        button("Stage Channel", focusable=False), text("stage-one"),
+        text("0 is speaking"), text("1 in audience"),
+    ]
+    if withChat:
+        pane.append(group("Text chat for stage channel stage-one", [
+            text("stage-one chat", headingLevel=2),
+            node(pb.CT_DOCUMENT, "", [node(pb.CT_LIST, "Messages in stage-one", [
+                node(pb.CT_LISTITEM, "", [text("This is the start of the stage-one channel.")]),
+            ], focusable=True)]),
+            node(pb.CT_EDIT, "Message stage-one", focusable=True),
+        ]))
+    else:
+        pane.append(button("Show Chat"))
+    return window(pane, title="stage-one | Server One - Discord")
+
+
+def _settingsModal(name, sections, content):
+    """Server or Channel Settings: an unnamed grouping of tab lists, then the page."""
+    return node(pb.CT_WINDOW, name, [
+        group(), group(),
+        group("", [node(pb.CT_TAB, title, [tab(p) for p in pages]) for title, pages in sections]),
+    ] + content + [button("Close, ESC")], focusable=True)
+
+
+def serverSettingsScreen():
+    _ids[0] = 0
+    return _modalWindow(_settingsModal("", [
+        ("Server One", ["Server Profile", "Server Tag", "Engagement"]),
+        ("People", ["Members", "Manage Roles", "Invites"]),
+        ("Moderation", ["Safety Setup", "Audit Log", "Bans"]),
+    ], [
+        text("Server Profile", headingLevel=2),
+        text("Name"), node(pb.CT_EDIT, "Name", focusable=True, hasValue=True, value="Server One"),
+        node(pb.CT_BUTTON, "Private Profile", focusable=True, hasToggle=True, toggleState=0),
+    ]), title="#general | Server One - Discord")
+
+
+def channelSettingsScreen():
+    _ids[0] = 0
+    return _modalWindow(_settingsModal("Channel Settings", [
+        ("Settings", ["Overview", "Permissions", "Invites", "Integrations"]),
+    ], [
+        node(pb.CT_PANE, "", [
+            text("Overview", headingLevel=2),
+            node(pb.CT_EDIT, "Channel Name", focusable=True, hasValue=True, value="general"),
+            node(pb.CT_COMBOBOX, "Slowmode", focusable=True, hasValue=True, value="Off"),
+        ]),
+    ]), title="#general | Server One - Discord")
+
+
+def pinnedPopupScreen():
+    """Pinned Messages: a popup that leaves the channel showing behind it."""
+    raw = channelScreen(members=False)
+    raw.children.insert(2, node(pb.CT_WINDOW, "Pinned Messages", [
+        text("Pinned Messages"),
+        node(pb.CT_LIST, "", [text("This channel doesn't have any pinned messages... yet.")]),
+    ], focusable=True))
+    return raw
+
+
+def eventsScreen():
+    _ids[0] = 0
+    return _modalWindow(node(pb.CT_WINDOW, "Events", [
+        text("Events"), button("Create Event"), button("Close"), text("There are no upcoming events."),
+    ], focusable=True))
+
+
+def serverMembersScreen():
+    content = [text("Members"), text("Recent Members", headingLevel=2), node(pb.CT_EDIT, "Search", focusable=True),
+               node(pb.CT_TABLE, "Recent Members", [node(pb.CT_DATAITEM, "", [node(pb.CT_DATAITEM, "Name")])])]
+    raw = page("SO", content, windowTitle="Members | Server One - Discord", channelsList=serverSidebar())
+    return raw
+
+
+def browseChannelsScreen():
+    content = [text("Browse Channels"), text("Text Channels"),
+               button("general", [text("general"), text("Active 2 years ago")])]
+    return page("SO", content, windowTitle="Browse Channels - Server One - Discord", channelsList=serverSidebar())
+
+
+def serverBoostsScreen():
+    content = [text("Server Boosts", headingLevel=1), text("Levels", headingLevel=2), button("Boost This Server")]
+    return page("SO", content, windowTitle="Discord", channelsList=serverSidebar())
+
+
 def lines(buf):
     out = []
     for i, start in enumerate(buf.lineStarts):

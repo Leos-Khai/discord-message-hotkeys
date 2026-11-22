@@ -25,9 +25,13 @@ the same commit that bumps the version.
   activity cards are one line each, and repeated labels, server tags and
   tooltips don't clutter the reading. Moving up past the oldest loaded message
   loads older ones, as in the Electron client, without moving the mouse.
-- **Browse mode works on every screen of the new client,** including the ones
-  that open over the window: Settings, user profiles and profile cards, the
-  Inbox and the status menu. Forum posts open in a thread panel with its own
+- **Browse mode works on every screen of the new client,** including voice
+  and stage channels and their text chats, a server's Members, Browse Channels
+  and Server Boosts pages, and the ones that open over the window: User,
+  Server and Channel Settings, user profiles and profile cards, the Inbox,
+  Events, the Threads and Pinned Messages popups and the status menu. Call
+  buttons that have no name of their own (camera, screen share, activities)
+  read their label and can be pressed. Forum posts open in a thread panel with its own
   landmark; settings options read once, as the control and its state; Discover
   and Quests read each card's name before its action; the message hotkeys also
   work inside a thread.
