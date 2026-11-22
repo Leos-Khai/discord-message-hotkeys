@@ -19,6 +19,7 @@
 # the caret is carried across rebuilds by UIA runtime ID, so it stays on the
 # same message or control even as new messages arrive.
 
+import ctypes
 import threading
 import time
 
@@ -72,6 +73,23 @@ ACTIVATE_LOOKUP_DEPTH = 4
 # Pressed on Enter rather than entered in focus mode.
 SELECT_ON_ACTIVATE_ROLES = ("treeItem", "tab")
 
+# Loading older history as you read. Phoenix exposes no UIA scroll patterns, but
+# GPUI handles WM_MOUSEWHEEL posted to its window, without the pointer moving
+# or the window being in front. Tested 2026-11-22 in a group DM: the wheel
+# first scrolls through what is loaded (5 notches: nothing new), and Discord
+# loads another page only once the view nears the top (10 notches: 20 older
+# messages). Newer messages stay loaded while scrolled up, so only this end
+# needs it. When the browse mode caret gets within LOAD_MORE_EDGE_ROWS of the
+# oldest loaded message, scroll up in steps until something older appears -
+# the way moving through the Electron client's list made Chromium load more.
+LOAD_MORE_EDGE_ROWS = 2
+LOAD_MORE_WHEEL_NOTCHES = 5
+LOAD_MORE_STEP_MS = 400
+LOAD_MORE_MAX_STEPS = 8
+WM_MOUSEWHEEL = 0x020A
+WHEEL_DELTA = 120
+MESSAGES_LIST_PREFIX = "messages"
+
 
 def _enum(container, name, fallback):
     try:
@@ -105,6 +123,16 @@ ROLES = {
     "document": _role("DOCUMENT"), "titleBar": _role("TITLEBAR"), "unknown": _role("UNKNOWN"),
 }
 ROLE_LANDMARK = _role("LANDMARK")
+ROLE_REGION = _role("REGION")
+try:
+    import aria
+    LANDMARK_NAMES = frozenset(aria.landmarkRoles)
+except Exception:  # pragma: no cover
+    LANDMARK_NAMES = frozenset(("banner", "complementary", "contentinfo", "main", "navigation", "search", "form"))
+try:
+    _FOCUS_REASON = controlTypes.OutputReason.FOCUS
+except AttributeError:  # NVDA before 2021.1
+    _FOCUS_REASON = getattr(controlTypes, "REASON_FOCUS", None)
 try:
     TREE_ROLE_TEXT = ROLES["tree"].displayString
 except Exception:
@@ -407,6 +435,7 @@ class PhoenixBrowseDocument(browseMode.BrowseModeDocumentTreeInterceptor):
         self._generation = 0         # bumped for every load started
         self._appliedGeneration = 0  # the load the current buffer came from
         self._refreshTimer = None
+        self._loadMore = None  # state of a running "load older messages"
         super(PhoenixBrowseDocument, self).__init__(rootNVDAObject)
 
     # -- lifetime ----------------------------------------------------------------
@@ -587,6 +616,91 @@ class PhoenixBrowseDocument(browseMode.BrowseModeDocumentTreeInterceptor):
             # ranges of the current document.
             self._startLoad()
 
+    # -- loading more messages -------------------------------------------------
+
+    def _set_selection(self, info, *args, **kwargs):
+        super(PhoenixBrowseDocument, self)._set_selection(info, *args, **kwargs)
+        reason = kwargs.get("reason", args[0] if args else None)
+        if reason == _FOCUS_REASON:
+            return  # Discord moved focus itself and scrolls on its own
+        try:
+            self._maybeLoadMore(info)
+        except Exception:
+            log.debugWarning("Discord: loading more messages failed", exc_info=True)
+
+    def _maybeLoadMore(self, info):
+        if info._startOffset != info._endOffset:
+            return  # selecting, not moving
+        buf = getattr(info, "_buf", None) or self._buffer
+        if buf is None:
+            return
+        row, listNode = self._messageRowAt(buf, info._startOffset)
+        if row is None:
+            return
+        if self._loadMore is not None:
+            return  # already loading
+        rows = [n for n in buf.nodes if n.parent is listNode]
+        if row not in rows[:LOAD_MORE_EDGE_ROWS]:
+            return
+        self._loadMore = {"list": listNode.runtimeId, "oldest": rows[0].runtimeId, "steps": 0}
+        self._loadMoreStep()
+
+    def _loadMoreStep(self):
+        state = self._loadMore
+        buf = self._buffer
+        listNode = buf.findNode(state["list"]) if (state and buf) else None
+        if self._terminated or listNode is None or not self._scrollList(listNode, 1):
+            self._loadMore = None
+            return
+        wx.CallLater(LOAD_MORE_STEP_MS, self._loadMoreCheck)
+
+    def _loadMoreCheck(self):
+        state = self._loadMore
+        if state is None or self._terminated:
+            return
+        if not self._isActive() or _sayAllRunning() or not self._refreshNow():
+            self._loadMore = None
+            return
+        buf = self._buffer
+        listNode = buf.findNode(state["list"])
+        rows = [n for n in buf.nodes if n.parent is listNode] if listNode is not None else []
+        if rows and rows[0].runtimeId != state["oldest"]:
+            # Older messages arrived above; the caret stayed on its message.
+            self._loadMore = None
+            braille.handler.handleUpdate(self)
+            return
+        state["steps"] += 1
+        if state["steps"] >= LOAD_MORE_MAX_STEPS:
+            self._loadMore = None  # the start of the conversation, or Discord is slow
+            return
+        self._loadMoreStep()
+
+    @staticmethod
+    def _messageRowAt(buf, offset):
+        """(row, list) for the message row at offset, or (None, None)."""
+        node = buf.nodeAt(offset)
+        while node is not None:
+            parent = node.parent
+            if (parent is not None and parent.role == "list"
+                    and parent.fieldName.lower().startswith(MESSAGES_LIST_PREFIX)):
+                return node, parent
+            node = parent
+        return None, None
+
+    def _scrollList(self, listNode, direction):
+        """Post mouse wheel notches over the message list. True if posted."""
+        obj = self._objectForNode(listNode)
+        location = obj.location if obj is not None else None
+        if not location or not location.width or not location.height:
+            return False
+        x = location.left + location.width // 2
+        y = location.top + location.height // 2
+        wParam = ((direction * WHEEL_DELTA) & 0xFFFF) << 16
+        lParam = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
+        for _ in range(LOAD_MORE_WHEEL_NOTCHES):
+            ctypes.windll.user32.PostMessageW(self._hwnd, WM_MOUSEWHEEL, wParam, lParam)
+        return True
+
     def _markDirty(self, obj, nextHandler, **kwargs):
         self._dirty = True
         nextHandler()
@@ -639,9 +753,15 @@ class PhoenixBrowseDocument(browseMode.BrowseModeDocumentTreeInterceptor):
     def _controlField(self, node):
         field = textInfos.ControlField()
         role = ROLES.get(node.role) or ROLES["unknown"]
-        if node.landmark and ROLE_LANDMARK is not None:
+        if node.landmark and node.landmark in LANDMARK_NAMES and ROLE_LANDMARK is not None:
             role = ROLE_LANDMARK
             field["landmark"] = node.landmark
+        elif node.landmark:
+            # "region" is not an ARIA landmark to NVDA: speech looks the type up
+            # in aria.landmarkRoles and raised KeyError: 'region' on every quick
+            # navigation key that entered one (NVDA log, 2026-11-22). NVDA has a
+            # Region role for it instead: "User status and settings region".
+            role = ROLE_REGION or ROLES["grouping"]
         elif node.role == "tree":
             # NVDA presents a tree view as a single-line control, which would
             # say "tree view" again on every server. Present it as the
