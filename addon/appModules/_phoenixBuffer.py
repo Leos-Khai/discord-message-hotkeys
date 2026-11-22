@@ -159,6 +159,7 @@ _LIST_MARKER_RE = re.compile(r"^(\d+[.)]|[a-z][.)]|[•◦▪‣-])$")
 _SERVER_TAG_RE = re.compile(r"\s*Server Tag: [^\s,]+")
 _ICON_SUFFIX_RE = re.compile(r", [^,]* icon$", re.IGNORECASE)
 _SHORTCODES_RE = re.compile(r"(\s+:[\w+-]+:)+$")
+_QUOTE_MARK_RE = re.compile(r"^\s*>\s?")
 MESSAGE_ACTIONS_NAME = "message actions"
 JUMP_TO_REPLY_NAME = "jump to reply"
 # Window controls Phoenix draws as children of the window itself (automation
@@ -915,8 +916,97 @@ class _Builder(object):
             skip.add(id(jump))
         elif replyTo:
             self.emit(node, "Replying to %s" % replyTo)
-        if text:
+        content = self._messageTextGroup(raw, text)
+        if content is not None and self._hasStructure(content):
+            # Lists, code blocks, quotes, headings: the summary runs them
+            # together on one line; read them from the message's own parts.
+            self._renderMessageContent(content, node, depth + 1)
+            skip.add(id(content))
+        elif text:
             self.emit(node, text)
+
+    @staticmethod
+    def _messageTextGroup(body, text):
+        """The grouping holding a message's text: named as the text, after the header."""
+        want = _norm(text)
+        for ch in body.children:
+            if ch.controlType == CT_GROUP and not ch.focusable and ch.name and _norm(ch.name) == want:
+                return ch
+        return None
+
+    @staticmethod
+    def _hasStructure(group):
+        """True if a message's text has blocks: more than one part, or a list/quote/heading."""
+        kids = group.children
+        if len(kids) > 1:
+            return True
+        return any(k.controlType in (CT_LIST, CT_GROUP) or (k.controlType == CT_TEXT and k.headingLevel)
+                   for k in kids)
+
+    def _renderMessageContent(self, group, parent, depth):
+        """A message's text, block by block (dumps of 2026-11-22).
+
+        GROUPING "<text>" > TEXT "Code block:", TEXT "" > TEXT "line one\\nline
+        two", BUTTON "Copy"; or > GROUPING "" > TEXT "a quote\\n> more"; or >
+        TEXT (H1) "Big heading", LIST > LISTITEM > [TEXT "1."], TEXT "first".
+        """
+        if group.runtimeId:
+            self.folded.append((group.runtimeId, parent))
+        for ch in group.children:
+            role = semanticRole(ch)
+            if role in CONTROL_ROLES:
+                self.render(ch, parent, depth, [], "")  # Copy, a link
+                continue
+            if ch.controlType == CT_LIST:
+                self._renderContentList(ch, parent, depth)
+                continue
+            if ch.controlType == CT_GROUP and not ch.name:
+                # A block quote. Discord keeps "> " on its later lines.
+                quote = Node(ch, "blockQuote", parent, depth)
+                quote.start = self.length
+                lines = [_QUOTE_MARK_RE.sub("", l) for l in self._contentText(ch).split("\n")]
+                self.emit(quote, "\n".join(l for l in lines if l.strip()) or " ")
+                quote.end = self.length
+                self.foldSubtree(ch, quote)
+                continue
+            line = self._contentText(ch)
+            if line:
+                textNode = Node(ch, "text", parent, depth)
+                textNode.isField = False
+                textNode.start = self.length
+                self.emit(textNode, line)
+                textNode.end = self.length
+                self.foldSubtree(ch, textNode)
+
+    def _renderContentList(self, lst, parent, depth):
+        listNode = Node(lst, "list", parent, depth)
+        listNode.states.add("readonly")
+        listNode.start = self.length
+        items = 0
+        for item in lst.children:
+            if item.controlType != CT_LISTITEM:
+                continue
+            itemNode = Node(item, "listItem", listNode, depth + 1)
+            itemNode.states.add("readonly")
+            itemNode.start = self.length
+            parts = [self._contentText(k) for k in item.children]
+            self.emit(itemNode, " ".join(p for p in parts if p) or " ")
+            itemNode.end = self.length
+            self.foldSubtree(item, itemNode)
+            items += 1
+        listNode.childControlCount = items
+        listNode.end = self.length
+        if lst.runtimeId:
+            self.folded.append((lst.runtimeId, listNode))
+
+    def _contentText(self, raw):
+        """All the text under raw, keeping its line breaks."""
+        own = cleanText(raw.name)
+        kids = [self._contentText(k) for k in raw.children]
+        kids = [k for k in kids if k]
+        if kids and (not own or self.covered(own, " ".join(_norm(k) for k in kids))):
+            return "\n".join(kids)
+        return own
 
     def _renderReplyContext(self, body, jump, node, depth, skip):
         """A reply's context as one line: "Replying to @Kim: quoted text".

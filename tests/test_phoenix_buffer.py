@@ -75,6 +75,36 @@ class ChannelReading(unittest.TestCase):
         self.assertEqual(failures(pc.runChecks(fx.channelScreen(), pc.WINDOW_CLASS)), [])
 
 
+class FormattedMessages(unittest.TestCase):
+
+    def setUp(self):
+        self.buf = pb.build(fx.formattedScreen())
+        self.lines = fx.lines(self.buf)
+
+    def after(self, line, count):
+        i = self.lines.index(line)
+        return self.lines[i:i + count]
+
+    def test_code_block_lines_are_separate_then_copy(self):
+        self.assertEqual(self.after("Ann, 12:07 pm", 5),
+                         ["Ann, 12:07 pm", "Code block:", "line one", "line two", "Copy"])
+
+    def test_quote_is_a_block_quote_without_markers(self):
+        self.assertEqual(self.after("a quote", 3), ["a quote", "more quote", "after"])
+        self.assertEqual(self.buf.nodeAt(self.buf.text.index("more quote")).role, "blockQuote")
+
+    def test_heading_and_list_items_each_on_their_own_line(self):
+        self.assertEqual(self.after("Smaller heading", 3), ["Smaller heading", "bullet one", "1. first"])
+        item = self.buf.nodeAt(self.buf.text.index("1. first"))
+        self.assertEqual((item.role, item.parent.role), ("listItem", "list"))
+
+    def test_plain_message_unchanged(self):
+        self.assertEqual(self.after("Ann, 12:09 pm", 2), ["Ann, 12:09 pm", "just text"])
+
+    def test_self_check_passes(self):
+        self.assertEqual(failures(pc.runChecks(fx.formattedScreen(), pc.WINDOW_CLASS)), [])
+
+
 class FriendsReading(unittest.TestCase):
 
     def setUp(self):

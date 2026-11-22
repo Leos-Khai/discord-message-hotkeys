@@ -35,6 +35,10 @@ the same commit that bumps the version.
   landmark; settings options read once, as the control and its state; Discover
   and Quests read each card's name before its action; the message hotkeys also
   work inside a thread.
+- **Formatted messages read block by block in the new client.** Code blocks
+  read one line at a time, followed by their Copy button; quotes are block
+  quotes without Discord's "> " markers; headings and each list item (with its
+  number) get their own line instead of running together.
 - **NVDA+Ctrl+Shift+F11 checks the new client after a Discord update.** It
   works out which screen is open (a channel, forum, thread, DM, Friends,
   Discover, Quests, Shop, Nitro, Message Requests, Settings, a profile, the

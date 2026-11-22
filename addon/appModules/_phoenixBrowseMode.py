@@ -123,6 +123,7 @@ ROLES = {
     "window": _role("WINDOW"), "statusBar": _role("STATUSBAR"), "toolBar": _role("TOOLBAR"),
     "header": _role("HEADER"), "table": _role("TABLE"), "dataGrid": _role("DATAGRID"),
     "document": _role("DOCUMENT"), "titleBar": _role("TITLEBAR"), "unknown": _role("UNKNOWN"),
+    "blockQuote": _role("BLOCKQUOTE"),
 }
 ROLE_LANDMARK = _role("LANDMARK")
 ROLE_REGION = _role("REGION")

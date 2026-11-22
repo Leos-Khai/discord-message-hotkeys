@@ -44,8 +44,11 @@ def link(name, children=(), **kw):
     return node(pb.CT_HYPERLINK, name, children, **kw)
 
 
-def message(author, body, time, fullDate, reply=None, extra=(), tag="ABCD", headed=True):
-    """A message row: LISTITEM > [SEPARATOR date] > GROUPING "author , text , time"."""
+def message(author, body, time, fullDate, reply=None, extra=(), tag="ABCD", headed=True,
+            content=None):
+    """A message row: LISTITEM > [SEPARATOR date] > GROUPING "author , text , time".
+
+    content: the parts of the text grouping, for formatted messages."""
     who = "%s Server Tag: %s" % (author, tag) if tag else author
     if reply:
         who += " replying to %s" % reply[0]
@@ -58,7 +61,7 @@ def message(author, body, time, fullDate, reply=None, extra=(), tag="ABCD", head
             button(author, [text(author)], hasExpandCollapse=True, hasInvoke=False),
             button("Server Tag: %s" % tag, hasExpandCollapse=True, hasInvoke=False),
             text(time), text(fullDate)]))
-    kids.append(group(body, [text(body)]))
+    kids.append(group(body, content if content is not None else [text(body)]))
     kids.extend(extra)
     return node(pb.CT_LISTITEM, "%s , %s , %s" % (who, body, time),
                 [group("%s , %s , %s" % (who, body, time), kids, focusable=True)])
@@ -149,6 +152,35 @@ def channelScreen(members=True):
         ]))
     pane.append(node(pb.CT_SEPARATOR, "Resize Sidebar", focusable=True))
     return window(pane)
+
+
+def formattedScreen():
+    """A channel with a code block, a quote, headings and lists (recorded 2026-11-22)."""
+    screen = channelScreen()
+    li = lambda *parts: node(pb.CT_LISTITEM, "", list(parts))
+    msgs = _find(screen, lambda n: n.name == "Messages in general")
+    msgs.children += [
+        message("Ann", "Code block: line one\nline two", "12:07 pm", "Today at 12:07 pm", content=[
+            text("Code block:"), text("", [text("line one\nline two")]), button("Copy")]),
+        message("Ann", "a quote\n> more quote\nafter", "12:07 pm", "", headed=False, content=[
+            group("", [text("a quote\n> more quote\nafter")])]),
+        message("Ann", "Smaller heading bullet one 1. first", "12:08 pm", "", headed=False, content=[
+            text("Smaller heading", headingLevel=2),
+            node(pb.CT_LIST, "", [li(text("bullet one"))]),
+            node(pb.CT_LIST, "", [li(text("1."), text("first"))])]),
+        message("Ann", "just text", "12:09 pm", "", headed=False),
+    ]
+    return screen
+
+
+def _find(raw, test):
+    if test(raw):
+        return raw
+    for ch in raw.children:
+        found = _find(ch, test)
+        if found is not None:
+            return found
+    return None
 
 
 def friendsScreen():
