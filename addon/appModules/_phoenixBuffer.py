@@ -159,6 +159,11 @@ _LIST_MARKER_RE = re.compile(r"^(\d+[.)]|[a-z][.)]|[•◦▪‣-])$")
 _SERVER_TAG_RE = re.compile(r"\s*Server Tag: [^\s,]+")
 MESSAGE_ACTIONS_NAME = "message actions"
 JUMP_TO_REPLY_NAME = "jump to reply"
+# Window controls Phoenix draws as children of the window itself (automation
+# IDs win-minimize / win-maximize / win-close). Not page content; NVDA's and
+# Windows' own commands do the same jobs.
+WINDOW_BUTTON_NAMES = frozenset(("minimize", "maximize", "restore", "close"))
+RESIZE_HANDLE_NAME = "resize sidebar"
 # Names for the sections the builder wraps itself (see _Builder._sections).
 TOP_BAR_NAME = "Top bar"
 PAGE_CONTENT_NAME = "Page content"
@@ -536,6 +541,10 @@ class _Builder(object):
         for ch in children:
             if ch.controlType == CT_TITLEBAR:
                 continue  # the OS title bar's System / Minimize / Close
+            if parent is None and ch.controlType == CT_BUTTON and _norm(ch.name) in WINDOW_BUTTON_NAMES:
+                continue  # Discord's own window buttons, beside the pane
+            if ch.controlType == CT_SEPARATOR and _norm(ch.name) == RESIZE_HANDLE_NAME:
+                continue  # the sidebar's drag handle
             if id(ch) in skip:
                 continue
             if summary and self.subtreeCovered(ch, summary):
