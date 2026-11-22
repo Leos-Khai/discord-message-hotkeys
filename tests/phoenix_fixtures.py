@@ -192,6 +192,10 @@ def formattedScreen():
         message("Cy", "fixed it (edited)", "12:22 pm", "", headed=False, content=[
             text(""), text("Edited Today at 12:23 pm", [text("(edited)")])]),
         # A thread started from a message: the summary runs on into its button.
+        # A hidden spoiler: a button with no Invoke inside the line.
+        message("Cy", "Spoiler Spoiler and a link https://example.com/", "12:23 pm", "", headed=False, content=[
+            text(""), button("Spoiler", hasInvoke=False, hasExpandCollapse=True), text(""),
+            link("https://example.com/")]),
         message("Cy", "start here", "12:24 pm", "", headed=False,
                 extra=[button("Thread Plans 1 Message ›", [text("Plans"), text("1 Message ›")])]),
     ]

@@ -43,7 +43,8 @@ the same commit that bumps the version.
   repeats its text while you edit it; a thread started from a message follows
   it as its own button; the toolbar Discord shows under the mouse is left out
   (the context menu has the same actions); the Create Thread panel is a
-  landmark; Inbox mentions name their author, not a role icon.
+  landmark; Inbox mentions name their author, not a role icon. Enter on a
+  hidden spoiler reveals it.
 - **NVDA+Ctrl+Shift+F11 checks the new client after a Discord update.** It
   works out which screen is open (a channel, forum, thread, DM, Friends,
   Discover, Quests, Shop, Nitro, Message Requests, Settings, a profile, the

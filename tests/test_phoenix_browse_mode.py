@@ -345,6 +345,23 @@ class Activation(unittest.TestCase):
         self.assertEqual([o.UIAElement.rid for o in pressed], [item.runtimeId])
         self.assertIsNone(doc.activated)
 
+    def test_enter_on_a_spoiler_focuses_it_and_presses_enter(self):
+        # Neither Expand nor a click reveals a spoiler; focus and Enter do.
+        doc = _document(fx.formattedScreen())
+        pressed = []
+        doc._focusAndPressEnter = pressed.append
+        spoiler = next(n for n in doc._buffer.nodes if n.raw.name == "Spoiler")
+        doc._activatePosition(info=doc.makeTextInfo(pbm.textInfos.offsets.Offsets(spoiler.start, spoiler.start)))
+        self.assertEqual([o.UIAElement.rid for o in pressed], [spoiler.runtimeId])
+        self.assertIsNone(doc.activated)
+        self.assertTrue(doc._dirty)
+
+    def test_enter_on_a_link_beside_a_spoiler_still_follows_it(self):
+        doc = _document(fx.formattedScreen())
+        doc._focusAndPressEnter = lambda obj: self.fail("pressed Enter")
+        doc._activatePosition(info=_at(doc, "https://example.com/"))
+        self.assertIsNotNone(doc.activated)
+
 
 if __name__ == "__main__":
     unittest.main()

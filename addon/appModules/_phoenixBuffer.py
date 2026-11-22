@@ -243,6 +243,14 @@ def _stripServerTag(text):
     return (stripped + sep + rest) if stripped else text
 
 
+def isHiddenSpoiler(raw):
+    """A spoiler not yet revealed: BUTTON "Spoiler" in a message's text.
+
+    Revealed, it becomes focusable TEXT with the hidden words (2026-11-22)."""
+    return raw is not None and raw.controlType == CT_BUTTON and _norm(raw.name) == "spoiler" \
+        and not raw.hasInvoke
+
+
 def _isDecoration(raw, normText):
     """Detail that only adds noise inside a line: channel-type icons, server tags."""
     if raw.controlType == CT_IMAGE and normText.endswith(" icon"):
@@ -948,8 +956,9 @@ class _Builder(object):
             if text and not any(ch.controlType == CT_EDIT for ch in raw.children):
                 # While a message is being edited its text is the edit box's value.
                 self.emit(node, text)
-            if content is not None:
+            if content is not None and not self.hasControlDescendant(content):
                 # Read in the summary; an edited message's "Edited <date>" stamp too.
+                # (Links, spoilers and mentions in it still get their own lines.)
                 skip.add(id(content))
                 self.foldSubtree(content, node)
         # What the message line said, for leaving out children that repeat it.

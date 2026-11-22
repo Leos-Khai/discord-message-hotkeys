@@ -843,6 +843,14 @@ class PhoenixBrowseDocument(browseMode.BrowseModeDocumentTreeInterceptor):
                 obj = self._objectForNode(target)
             if obj is None:
                 return
+            if target is not None and pb.isHiddenSpoiler(target.raw):
+                # A hidden spoiler is a button with no Invoke, and Expand and
+                # clicks don't reveal it; focus and Enter do (tested
+                # 2026-11-22). The revealed words reach the document on its
+                # next refresh.
+                self._focusAndPressEnter(obj)
+                self._dirty = True
+                return
             if target is not None and target.role in SELECT_ON_ACTIVATE_ROLES and target.isActionable:
                 # A server, folder or tab: Enter opens it, as clicking would.
                 # (Browse mode would otherwise just switch to focus mode on it.)
