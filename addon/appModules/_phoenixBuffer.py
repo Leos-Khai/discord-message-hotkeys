@@ -251,6 +251,19 @@ def isHiddenSpoiler(raw):
         and not raw.hasInvoke
 
 
+def hiddenSpoilers(raw):
+    """The hidden spoilers in a message, in reading order."""
+    found = []
+    stack = [raw]
+    while stack:
+        r = stack.pop()
+        if isHiddenSpoiler(r):
+            found.append(r)
+            continue
+        stack.extend(reversed(r.children))
+    return found
+
+
 def _isDecoration(raw, normText):
     """Detail that only adds noise inside a line: channel-type icons, server tags."""
     if raw.controlType == CT_IMAGE and normText.endswith(" icon"):
@@ -669,6 +682,11 @@ class _Builder(object):
                 continue  # the sidebar's drag handle
             if id(ch) in skip:
                 continue
+            if isHiddenSpoiler(ch):
+                # The message line says "Spoiler" where it is; Enter on the
+                # message reveals it (and any others in the message).
+                self.foldSubtree(ch, node)
+                continue
             if summary and self.subtreeCovered(ch, summary):
                 self.foldSubtree(ch, node)
                 continue
@@ -1021,6 +1039,9 @@ class _Builder(object):
             self.folded.append((group.runtimeId, parent))
         for ch in group.children:
             role = semanticRole(ch)
+            if isHiddenSpoiler(ch):
+                self.foldSubtree(ch, parent)  # revealed with Enter on the message
+                continue
             if role in CONTROL_ROLES:
                 self.render(ch, parent, depth, [], "")  # Copy, a link
                 continue
@@ -1242,10 +1263,6 @@ class _Builder(object):
             r = stack.pop()
             role = semanticRole(r)
             if role in CONTROL_ROLES and role != "button":
-                return False
-            if isHiddenSpoiler(r):
-                # Its label "Spoiler" is in the summary, but Enter on it is
-                # how the words are revealed: it needs its own line.
                 return False
             if role in NAME_IN_FIELD_ROLES:
                 return False

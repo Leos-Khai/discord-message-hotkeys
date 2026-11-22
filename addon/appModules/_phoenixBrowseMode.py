@@ -30,6 +30,7 @@ import browseMode
 import config
 import controlTypes
 import queueHandler
+import speech
 import textInfos
 import textInfos.offsets
 import ui
@@ -74,6 +75,10 @@ ACTIVATE_LOOKUP_DEPTH = 4
 SELECT_ON_ACTIVATE_ROLES = ("treeItem", "tab")
 # Wait between focusing an item and pressing Enter on it.
 FOCUS_BEFORE_KEY_MS = 150
+# Revealing spoilers: the gap after each Enter before focusing the next, and
+# the wait after the last before reading the message again.
+SPOILER_STEP_MS = 250
+SPOILER_SETTLE_MS = 400
 
 # Loading older history as you read. Phoenix exposes no UIA scroll patterns, but
 # GPUI handles WM_MOUSEWHEEL posted to its window, without the pointer moving
@@ -136,6 +141,10 @@ try:
     _FOCUS_REASON = controlTypes.OutputReason.FOCUS
 except AttributeError:  # NVDA before 2021.1
     _FOCUS_REASON = getattr(controlTypes, "REASON_FOCUS", None)
+try:
+    _CARET_REASON = controlTypes.OutputReason.CARET
+except AttributeError:  # NVDA before 2021.1
+    _CARET_REASON = getattr(controlTypes, "REASON_CARET", None)
 try:
     TREE_ROLE_TEXT = ROLES["tree"].displayString
 except Exception:
@@ -843,14 +852,13 @@ class PhoenixBrowseDocument(browseMode.BrowseModeDocumentTreeInterceptor):
                 obj = self._objectForNode(target)
             if obj is None:
                 return
-            if target is not None and pb.isHiddenSpoiler(target.raw):
-                # A hidden spoiler is a button with no Invoke, and Expand and
-                # clicks don't reveal it; focus and Enter do (tested
-                # 2026-11-22). The revealed words reach the document on its
-                # next refresh.
-                self._focusAndPressEnter(obj)
-                self._dirty = True
-                return
+            if target is not None and not (target.isActionable or target.role == "edit"):
+                # Enter on a message's text reveals its spoilers. The line says
+                # "Spoiler" where each one is; there is no separate button.
+                spoilers = self._hiddenSpoilersAt(node)
+                if spoilers:
+                    self._revealSpoilers(spoilers)
+                    return
             if target is not None and target.role in SELECT_ON_ACTIVATE_ROLES and target.isActionable:
                 # A server, folder or tab: Enter opens it, as clicking would.
                 # (Browse mode would otherwise just switch to focus mode on it.)
@@ -863,6 +871,50 @@ class PhoenixBrowseDocument(browseMode.BrowseModeDocumentTreeInterceptor):
                     self._activateNVDAObject(obj)
                 return
         super(PhoenixBrowseDocument, self)._activatePosition(obj=obj)
+
+    def _hiddenSpoilersAt(self, node):
+        """NVDAObjects for the hidden spoilers in the message at node."""
+        while node is not None and not pb.isMessageBody(node.raw):
+            node = node.parent
+        if node is None:
+            return []
+        objs = []
+        for raw in pb.hiddenSpoilers(node.raw):
+            if raw.element is None or UIA is None:
+                continue
+            try:
+                objs.append(UIA(windowHandle=self._hwnd, UIAElement=raw.element))
+            except Exception:
+                log.debugWarning("Discord: no NVDAObject for a spoiler", exc_info=True)
+        return objs
+
+    def _revealSpoilers(self, objs):
+        """Reveal spoilers one after another, then read the message again.
+
+        A hidden spoiler is a button with no Invoke; neither Expand nor a
+        click reveals it, but focus and Enter do, and the other spoilers'
+        elements stay valid after one opens (tested 2026-11-22).
+        """
+        pending = list(objs)
+
+        def next_():
+            if not pending:
+                wx.CallLater(SPOILER_SETTLE_MS, done)
+                return
+            self._focusAndPressEnter(pending.pop(0))
+            wx.CallLater(FOCUS_BEFORE_KEY_MS + SPOILER_STEP_MS, next_)
+
+        def done():
+            self._dirty = True
+            try:
+                if self._refreshNow():
+                    info = self.makeTextInfo(textInfos.POSITION_CARET)
+                    info.expand(textInfos.UNIT_LINE)
+                    speech.speakTextInfo(info, unit=textInfos.UNIT_LINE, reason=_CARET_REASON)
+            except Exception:
+                log.debugWarning("Discord: couldn't read a revealed spoiler", exc_info=True)
+
+        next_()
 
     def _focusAndPressEnter(self, obj):
         try:

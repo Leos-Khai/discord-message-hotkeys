@@ -201,6 +201,10 @@ def formattedScreen():
             button("Spoiler", hasInvoke=False, hasExpandCollapse=True)]),
         message("Cy", "this is Spoiler", "12:26 pm", "", headed=False, content=[
             text(""), button("Spoiler", hasInvoke=False, hasExpandCollapse=True)]),
+        # Two spoilers in one message (recorded in a thread, 2026-11-22).
+        message("Cy", "a Spoiler b Spoiler", "12:27 pm", "", headed=False, content=[
+            text(""), button("Spoiler", hasInvoke=False, hasExpandCollapse=True),
+            text(""), button("Spoiler", hasInvoke=False, hasExpandCollapse=True)]),
         message("Cy", "start here", "12:24 pm", "", headed=False,
                 extra=[button("Thread Plans 1 Message ›", [text("Plans"), text("1 Message ›")])]),
     ]

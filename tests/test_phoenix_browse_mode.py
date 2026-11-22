@@ -42,6 +42,7 @@ def _install_fake_nvda():
     mod("config", conf={"discordMessageHotkeys": {"phoenixBrowseMode": True}})
     mod("queueHandler", eventQueue=None, queueFunction=lambda q, f, *a: None)
     mod("ui", message=lambda *a: None)
+    mod("speech", speakTextInfo=lambda *a, **k: None)
     mod("winUser", isWindow=lambda h: True)
     quiet = lambda *a, **k: None  # noqa: E731
     mod("logHandler", log=types.SimpleNamespace(debugWarning=quiet, error=quiet, debug=quiet))
@@ -345,16 +346,37 @@ class Activation(unittest.TestCase):
         self.assertEqual([o.UIAElement.rid for o in pressed], [item.runtimeId])
         self.assertIsNone(doc.activated)
 
-    def test_enter_on_a_spoiler_focuses_it_and_presses_enter(self):
+    def test_enter_on_a_message_reveals_all_its_spoilers(self):
         # Neither Expand nor a click reveals a spoiler; focus and Enter do.
+        doc = _document(fx.formattedScreen())
+        revealed = []
+        doc._revealSpoilers = revealed.append
+        doc._activatePosition(info=_at(doc, "a Spoiler b Spoiler"))
+        body = next(n for n in doc._buffer.nodes if pb.isMessageBody(n.raw) and "a Spoiler b" in n.raw.name)
+        self.assertEqual([o.UIAElement.rid for o in revealed[0]],
+                         [r.runtimeId for r in pb.hiddenSpoilers(body.raw)])
+        self.assertEqual(len(revealed[0]), 2)
+        self.assertIsNone(doc.activated)
+
+    def test_reveal_focuses_and_presses_enter_on_each(self):
         doc = _document(fx.formattedScreen())
         pressed = []
         doc._focusAndPressEnter = pressed.append
-        spoiler = next(n for n in doc._buffer.nodes if n.raw.name == "Spoiler")
-        doc._activatePosition(info=doc.makeTextInfo(pbm.textInfos.offsets.Offsets(spoiler.start, spoiler.start)))
-        self.assertEqual([o.UIAElement.rid for o in pressed], [spoiler.runtimeId])
-        self.assertIsNone(doc.activated)
-        self.assertTrue(doc._dirty)
+        later = []
+        pbm.wx.CallLater = lambda ms, f, *a: later.append(f)
+        try:
+            doc._revealSpoilers(["one", "two"])
+            while later and len(pressed) < 2:
+                later.pop(0)()
+        finally:
+            pbm.wx.CallLater = lambda ms, f, *a: None
+        self.assertEqual(pressed, ["one", "two"])
+
+    def test_enter_on_a_message_without_spoilers_is_unchanged(self):
+        doc = _document(fx.formattedScreen())
+        doc._revealSpoilers = lambda objs: self.fail("revealed")
+        doc._activatePosition(info=_at(doc, "just text"))
+        self.assertIsNotNone(doc.activated)
 
     def test_enter_on_a_link_beside_a_spoiler_still_follows_it(self):
         doc = _document(fx.formattedScreen())
