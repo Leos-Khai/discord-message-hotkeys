@@ -159,6 +159,11 @@ _LIST_MARKER_RE = re.compile(r"^(\d+[.)]|[a-z][.)]|[•◦▪‣-])$")
 _SERVER_TAG_RE = re.compile(r"\s*Server Tag: [^\s,]+")
 MESSAGE_ACTIONS_NAME = "message actions"
 JUMP_TO_REPLY_NAME = "jump to reply"
+# Names for the sections the builder wraps itself (see _Builder._sections).
+TOP_BAR_NAME = "Top bar"
+PAGE_CONTENT_NAME = "Page content"
+USER_AREA_NAME = "user status and settings"
+CHANNEL_HEADER_NAME = "channel header"
 # Wording that only says what pressing a row does; the row's name follows it.
 LEAD_LABEL_PREFIXES = ("open conversation with ",)
 
@@ -196,6 +201,7 @@ class RawNode(object):
         "offscreen", "toggleState", "selected", "expandState", "headingLevel",
         "hasInvoke", "hasToggle", "hasSelectionItem", "hasExpandCollapse",
         "hasValue", "valueReadOnly", "runtimeId", "element", "children",
+        "landmarkHint",
     )
 
     def __init__(self, controlType=0, name="", value=None, focusable=False, focused=False,
@@ -223,6 +229,9 @@ class RawNode(object):
         self.runtimeId = runtimeId
         self.element = element
         self.children = children if children is not None else []
+        # For a grouping the builder made up (a section with no container in
+        # the tree): the landmark it should be.
+        self.landmarkHint = None
 
 
 class Node(object):
@@ -297,7 +306,7 @@ def landmarkFor(name, depth):
     Elements List can jump between them again. Depth 2 = window > pane > region.
     """
     lower = name.lower()
-    if lower.startswith("members list for"):
+    if lower.startswith("members list for") or lower.endswith("'s profile"):
         return "complementary"
     if lower.endswith("(channel)") or lower.startswith("text chat for voice channel"):
         return "main"
@@ -477,8 +486,8 @@ class _Builder(object):
             # Container.
             if not isTreeRoot and name:
                 # Focusable groupings are cards (a quest, a message), not regions.
-                landmark = landmarkFor(name, depth) \
-                    if role in ("grouping", "pane") and not raw.focusable else None
+                landmark = getattr(raw, "landmarkHint", None) or (landmarkFor(name, depth)
+                                                if role in ("grouping", "pane") and not raw.focusable else None)
                 if landmark:
                     node.landmark = landmark
                     node.fieldName = name
@@ -526,6 +535,9 @@ class _Builder(object):
 
         if role == "listItem" and not actsAsControl:
             self._renderListItemLead(raw, node, depth, skip)
+        children = raw.children
+        if depth == 1 and role == "pane":
+            children = self._sections(raw)
 
         # Children. Text that only repeats a recent sibling ("Blind samurai"
         # beside the server item "2 mentions, Blind samurai", or a friend's
@@ -540,7 +552,7 @@ class _Builder(object):
         lowerName = name.lower()
         tooltipZone = lowerName == MESSAGE_ACTIONS_NAME
         isConversation = lowerName.endswith("(channel)") or lowerName.startswith("text chat for voice channel")
-        for ch in raw.children:
+        for ch in children:
             if ch.controlType == CT_TITLEBAR:
                 continue  # the OS title bar's System / Minimize / Close
             if id(ch) in skip:
@@ -594,6 +606,74 @@ class _Builder(object):
         node.childControlCount = childNodes
         node.end = self.length
         return self._finish(node, parent, role, depth)
+
+    @staticmethod
+    def _sections(pane):
+        """The main pane's children, with loose runs wrapped as landmarks.
+
+        Discord's F6 moves between the window's sections. Most are named
+        groupings ("Servers sidebar", "<name> (channel)") and become landmarks
+        as they are, but two have no container in the tree: the top bar (page
+        title, Back, Forward, Inbox, Submit a Bug Report) and, on pages like
+        Quests, Shop or Message Requests, the page content itself. Each run of
+        loose elements becomes a made-up grouping so D reaches it too.
+        """
+        children = pane.children
+        title = ""
+        for ch in children:
+            if ch.controlType == CT_TEXT and ch.name:
+                title = cleanText(ch.name)
+                break
+        hasMain = any(ch.controlType == CT_GROUP and landmarkFor(ch.name or "", 2) == "main"
+                      for ch in children)
+
+        def isNamedGroup(ch):
+            return ch.controlType in (CT_GROUP, CT_PANE) and bool(ch.name) and not ch.focusable
+
+        def isSideSection(ch):
+            # Sections beside the page content, never part of it.
+            if ch.controlType in (CT_SEPARATOR, CT_TITLEBAR):
+                return True
+            if not isNamedGroup(ch):
+                return False
+            lower = ch.name.lower()
+            return (landmarkFor(ch.name, 2) in ("navigation", "complementary", "main")
+                    or lower in (USER_AREA_NAME, CHANNEL_HEADER_NAME))
+
+        out, run = [], []
+        state = {"seenSection": False, "mainGiven": hasMain}
+
+        def flush(content):
+            if not run:
+                return
+            if not state["seenSection"]:
+                section = RawNode(CT_GROUP, TOP_BAR_NAME, children=list(run))
+                section.landmarkHint = "banner"
+            elif len(run) == 1 and isNamedGroup(run[0]) and not state["mainGiven"]:
+                # A page whose content is already one named grouping
+                # ("Friends"): that grouping is the main landmark.
+                section = run[0]
+                section.landmarkHint = "main"
+            else:
+                section = RawNode(CT_GROUP, title or PAGE_CONTENT_NAME, children=list(run))
+                section.landmarkHint = "region" if state["mainGiven"] else "main"
+            if section.landmarkHint == "main":
+                state["mainGiven"] = True
+            out.append(section)
+            del run[:]
+
+        for ch in children:
+            if isSideSection(ch) or (isNamedGroup(ch) and not state["seenSection"]):
+                flush(False)
+                if ch.controlType in (CT_GROUP, CT_PANE):
+                    state["seenSection"] = True
+                out.append(ch)
+            else:
+                # Page content: loose elements and the groupings among them
+                # stay together in one section (Shop's menu sits mid-page).
+                run.append(ch)
+        flush(True)
+        return out
 
     def _renderListItemLead(self, raw, node, depth, skip):
         """A friend row: its first control plus the details after it, as one line.

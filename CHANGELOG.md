@@ -17,8 +17,10 @@ the same commit that bumps the version.
   so NVDA gave it no browse mode at all. The add-on now builds one from the
   client's accessibility tree: arrow through messages (one line each: author,
   text, time; replies say what they reply to in one line), use quick navigation
-  keys (H jumps between authors' messages; K, B, F, E, L, I, S; D for the server
-  list, channel list, conversation, member list and user area), NVDA+F7, find,
+  keys (H jumps between authors' messages; K, B, F, E, L, I, S; D for the
+  sections F6 moves between: top bar, server list, channel list, user area,
+  channel header, the page or conversation, and the member list or profile
+  panel), NVDA+F7, find,
   and Enter to open DMs, links, servers and tabs. Friends, members, DMs and
   activity cards are one line each, and repeated labels, server tags and
   tooltips don't clutter the reading. It keeps up with Discord while you
