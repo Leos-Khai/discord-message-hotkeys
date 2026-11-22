@@ -330,9 +330,20 @@ class Activation(unittest.TestCase):
 
     def test_enter_on_a_server_selects_it(self):
         doc = _document()
+        item = next(n for n in doc._buffer.nodes if n.role == "treeItem" and n.label.startswith("Unread"))
+        item.raw.selected = False
+        doc._activatePosition(info=_at(doc, "Unread messages, Server One"))
+        self.assertEqual(doc.activated.UIAElement.rid, item.runtimeId)
+
+    def test_enter_on_an_already_selected_item_focuses_it_and_presses_enter(self):
+        # Selecting what Discord already counts as selected does nothing.
+        doc = _document()
+        pressed = []
+        doc._focusAndPressEnter = pressed.append
         doc._activatePosition(info=_at(doc, "Unread messages, Server One"))
         item = next(n for n in doc._buffer.nodes if n.role == "treeItem" and n.label.startswith("Unread"))
-        self.assertEqual(doc.activated.UIAElement.rid, item.runtimeId)
+        self.assertEqual([o.UIAElement.rid for o in pressed], [item.runtimeId])
+        self.assertIsNone(doc.activated)
 
 
 if __name__ == "__main__":

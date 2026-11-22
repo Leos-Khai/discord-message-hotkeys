@@ -95,6 +95,108 @@ class FriendsReading(unittest.TestCase):
         self.assertEqual(failures(pc.runChecks(fx.friendsScreen(), pc.WINDOW_CLASS)), [])
 
 
+def landmarks(buf):
+    return [(n.fieldName, n.landmark) for n in buf.nodes if n.landmark]
+
+
+class EveryScreen(unittest.TestCase):
+    """Each screen recorded live is recognised, passes its checks, and reads well."""
+
+    SCREENS = [
+        ("channel", fx.channelScreen, {}),
+        ("announcement", fx.announcementScreen, {}),
+        ("forum", fx.forumScreen, {}),
+        ("forum", fx.forumScreen, {"withThread": True}),
+        ("dm", fx.dmScreen, {}),
+        ("groupDm", fx.dmScreen, {"group_": True}),
+        ("friends", fx.friendsScreen, {}),
+        ("discover", fx.discoverScreen, {}),
+        ("quests", fx.questsScreen, {}),
+        ("shop", fx.shopScreen, {}),
+        ("nitro", fx.nitroScreen, {}),
+        ("messageRequests", fx.messageRequestsScreen, {}),
+        ("settings", fx.settingsScreen, {}),
+        ("profile", fx.profileScreen, {}),
+        ("profile", fx.profileCardScreen, {}),
+        ("inbox", fx.inboxScreen, {}),
+        ("menu", fx.contextMenuScreen, {}),
+    ]
+    # A context menu is not a page: NVDA uses focus mode in it, and it has no landmarks.
+    WITHOUT_MAIN = ("menu",)
+
+    def test_each_screen_is_recognised_and_passes(self):
+        for kind, make, kw in self.SCREENS:
+            with self.subTest(screen=kind, **kw):
+                raw = make(**kw)
+                self.assertEqual(pc.detectScreen(raw).kind, kind)
+                self.assertEqual(failures(pc.runChecks(raw, pc.WINDOW_CLASS)), [])
+
+    def test_each_screen_has_one_main_landmark(self):
+        for kind, make, kw in self.SCREENS:
+            with self.subTest(screen=kind, **kw):
+                mains = [n for n, l in landmarks(pb.build(make(**kw))) if l == "main"]
+                self.assertEqual(len(mains), 0 if kind in self.WITHOUT_MAIN else 1, mains)
+
+    def test_inbox_mentions_read_like_messages(self):
+        lines = fx.lines(pb.build(fx.inboxScreen()))
+        i = lines.index("Kim, 7:10 am")
+        self.assertEqual(lines[i:i + 2], ["Kim, 7:10 am", "ping @Me"])
+
+    def test_context_menu_reactions_drop_shortcodes(self):
+        lines = fx.lines(pb.build(fx.contextMenuScreen()))
+        self.assertEqual(lines[0], "Add Reaction: thumbsup")
+        self.assertIn("Reply", lines)
+
+    def test_profile_card_reads_bio_and_roles(self):
+        lines = fx.lines(pb.build(fx.profileCardScreen()))
+        self.assertIn("Hello there.", lines)
+        self.assertIn("Remove role Mods", lines)
+
+    def test_settings_reads_each_option_once(self):
+        buf = pb.build(fx.settingsScreen())
+        lines = fx.lines(buf)
+        i = lines.index("Enable Desktop Notifications")
+        self.assertEqual(lines[i:i + 2], ["Enable Desktop Notifications", "Shows notifications on your desktop."])
+        self.assertEqual(lines.count("Enable Desktop Notifications"), 1)
+        self.assertIn("Someone reacts to my messages, All Messages", lines)
+        self.assertEqual(buf.nodeAt(buf.text.index("Enable Desktop")).role, "toggleButton")
+        self.assertEqual(lines.count("Notifications"), 2)  # its tab in the sidebar, and the page heading
+        self.assertNotIn("Breadcrumb", lines)
+
+    def test_settings_landmarks(self):
+        # The breadcrumb only repeats the page heading, so it is left out.
+        self.assertEqual(landmarks(pb.build(fx.settingsScreen())),
+                         [("Settings", "main"), ("Settings sidebar", "navigation")])
+
+    def test_profile_is_one_landmark_and_keeps_badge_details(self):
+        buf = pb.build(fx.profileScreen())
+        self.assertEqual(landmarks(buf), [("Alex's profile", "main")])
+        lines = fx.lines(buf)
+        self.assertEqual(lines[lines.index("Account Age") + 1], "Sequoia. 7 years, 2 months")
+
+    def test_dm_profile_panel_is_complementary(self):
+        self.assertIn(("Alex's profile", "complementary"), landmarks(pb.build(fx.dmScreen())))
+
+    def test_forum_and_thread(self):
+        buf = pb.build(fx.forumScreen(withThread=True))
+        found = landmarks(buf)
+        self.assertIn(("news", "main"), found)
+        self.assertIn(("Thread header", "region"), found)
+        self.assertIn(("Big release (thread)", "complementary"), found)
+        self.assertIn("poster, 11/11/2026 3:47 am", fx.lines(buf))
+
+    def test_discover_menu_and_cards(self):
+        buf = pb.build(fx.discoverScreen())
+        self.assertIn(("Discover", "navigation"), landmarks(buf))
+        self.assertIn("Game Hub, The official server for Game Hub., 5,000 Online, View server", fx.lines(buf))
+
+    def test_quests_cards_are_not_landmarks(self):
+        buf = pb.build(fx.questsScreen())
+        self.assertEqual([n for n, l in landmarks(buf) if l == "main"], ["Quests"])
+        self.assertNotIn("GAME QUEST", [n for n, _ in landmarks(buf)])
+        self.assertIn("Avatar Decoration, 15D 4H, View Quest", fx.lines(buf))
+
+
 class SelfCheckCatchesDiscordChanges(unittest.TestCase):
     """Each test changes the tree the way a Discord update might, and expects a failure."""
 
@@ -117,7 +219,7 @@ class SelfCheckCatchesDiscordChanges(unittest.TestCase):
 
     def test_message_list_renamed(self):
         names = self.failed(self.rename(fx.channelScreen(), "Messages in general", "Chat log"))
-        self.assertIn("Message list named 'Messages in ...'", names)
+        self.assertIn("Conversation: message list named 'Messages in ...'", names)
 
     def test_message_body_no_longer_a_focusable_grouping(self):
         raw = fx.channelScreen()
@@ -125,14 +227,41 @@ class SelfCheckCatchesDiscordChanges(unittest.TestCase):
             if pb.isMessageBody(r):
                 r.focusable = False
         names = self.failed(raw)
-        self.assertIn("Message body: focusable grouping 'author , text , time'", names)
+        self.assertIn("Conversation: message body is a focusable grouping 'author , text , time'", names)
 
     def test_message_headings_gone(self):
         raw = fx.channelScreen()
         for r in pc._walk(raw):
             if pb.isMessageBody(r):
                 r.children = [c for c in r.children if not (c.controlType == pb.CT_TEXT and c.headingLevel)]
-        self.assertIn("Message header: a heading inside the body", self.failed(raw))
+        self.assertIn("Conversation: message header is a heading inside the body", self.failed(raw))
+
+    def test_page_title_changed_is_unrecognised(self):
+        raw = self.rename(fx.questsScreen(), "Quests", "Quest Hub")
+        raw.name = "Quest Hub - Discord"
+        checks = pc.runChecks(raw, pc.WINDOW_CLASS)
+        self.assertEqual(next(c for c in checks if c.name == "Screen recognised").status, pc.WARN)
+
+    def test_settings_sidebar_renamed(self):
+        raw = self.rename(fx.settingsScreen(), "Settings sidebar", "Preferences menu")
+        self.assertNotEqual(pc.detectScreen(raw).kind, "settings")
+
+    def test_settings_options_no_longer_paired(self):
+        raw = fx.settingsScreen()
+        for r in pc._walk(raw):
+            if r.controlType == pb.CT_BUTTON and r.name == "Enable Desktop Notifications":
+                r.name = "Desktop notifications switch"
+        lines = fx.lines(pb.build(raw))
+        # The label is read again as text: the checker's repeat test can't see
+        # it (the names differ), but the reading test does.
+        self.assertIn("Enable Desktop Notifications", lines)
+
+    def test_forum_posts_renamed(self):
+        raw = fx.forumScreen()
+        for r in pc._walk(raw):
+            if r.controlType == pb.CT_BUTTON and r.name.startswith("Post "):
+                r.name = r.name[len("Post "):]
+        self.assertIn("Forum: posts are buttons named 'Post <title>, <n> messages'", self.failed(raw))
 
     def test_body_name_format_changed(self):
         raw = fx.channelScreen()
@@ -140,7 +269,7 @@ class SelfCheckCatchesDiscordChanges(unittest.TestCase):
             if pb.isMessageBody(r):
                 r.name = r.name.replace(" , ", " - ")
         # No longer recognised as messages at all.
-        self.assertIn("Message body: focusable grouping 'author , text , time'", self.failed(raw))
+        self.assertIn("Conversation: message body is a focusable grouping 'author , text , time'", self.failed(raw))
 
 
 if __name__ == "__main__":

@@ -25,11 +25,18 @@ the same commit that bumps the version.
   activity cards are one line each, and repeated labels, server tags and
   tooltips don't clutter the reading. Moving up past the oldest loaded message
   loads older ones, as in the Electron client, without moving the mouse.
+- **Browse mode works on every screen of the new client,** including the ones
+  that open over the window: Settings, user profiles and profile cards, the
+  Inbox and the status menu. Forum posts open in a thread panel with its own
+  landmark; settings options read once, as the control and its state; Discover
+  and Quests read each card's name before its action; the message hotkeys also
+  work inside a thread.
 - **NVDA+Ctrl+Shift+F11 checks the new client after a Discord update.** It
-  tests everything browse mode relies on in the open window (regions, the
-  message list, how messages and replies are built, the member list, the
-  Friends page, and the rendered document), says how many checks passed and
-  which failed, and saves a report to the Downloads folder. It keeps up with Discord while you
+  works out which screen is open (a channel, forum, thread, DM, Friends,
+  Discover, Quests, Shop, Nitro, Message Requests, Settings, a profile, the
+  Inbox or a menu), tests what browse mode relies on there and in the rendered
+  document, says how many checks passed and which failed, and saves a report
+  to the Downloads folder. It keeps up with Discord while you
   read, without moving you off the message you are on. NVDA+F5 refreshes it,
   Alt+V reads the message at the browse mode cursor, and it can be turned off
   in the add-on's settings.

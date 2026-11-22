@@ -72,6 +72,8 @@ OBJECT_LOOKUP_DEPTH = 10
 ACTIVATE_LOOKUP_DEPTH = 4
 # Pressed on Enter rather than entered in focus mode.
 SELECT_ON_ACTIVATE_ROLES = ("treeItem", "tab")
+# Wait between focusing an item and pressing Enter on it.
+FOCUS_BEFORE_KEY_MS = 150
 
 # Loading older history as you read. Phoenix exposes no UIA scroll patterns, but
 # GPUI handles WM_MOUSEWHEEL posted to its window, without the pointer moving
@@ -843,9 +845,32 @@ class PhoenixBrowseDocument(browseMode.BrowseModeDocumentTreeInterceptor):
             if target is not None and target.role in SELECT_ON_ACTIVATE_ROLES and target.isActionable:
                 # A server, folder or tab: Enter opens it, as clicking would.
                 # (Browse mode would otherwise just switch to focus mode on it.)
-                self._activateNVDAObject(obj)
+                if target.raw.selected and target.role == "treeItem":
+                    # Selecting an item Discord already counts as selected does
+                    # nothing (tested 2026-11-22: Discover, revisited from Nitro).
+                    # Do what a keyboard user does: focus it and press Enter.
+                    self._focusAndPressEnter(obj)
+                else:
+                    self._activateNVDAObject(obj)
                 return
         super(PhoenixBrowseDocument, self)._activatePosition(obj=obj)
+
+    def _focusAndPressEnter(self, obj):
+        try:
+            obj.setFocus()
+        except Exception:
+            log.debugWarning("Discord: couldn't focus a Phoenix item", exc_info=True)
+            return
+
+        def press():
+            try:
+                from keyboardHandler import KeyboardInputGesture
+                KeyboardInputGesture.fromName("enter").send()
+            except Exception:
+                log.debugWarning("Discord: couldn't press Enter on a Phoenix item", exc_info=True)
+
+        # Give Discord a moment to move focus before the key arrives.
+        wx.CallLater(FOCUS_BEFORE_KEY_MS, press)
 
     def _get_documentConstantIdentifier(self):
         return None

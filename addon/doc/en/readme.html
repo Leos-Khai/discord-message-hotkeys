@@ -114,7 +114,7 @@ on a web page:</p>
 
 <ul>
 <li><strong>Up and Down arrows</strong> move line by line. Each message starts
-with the author and the time on one line, "Orion, 8:49 am". For a reply, the
+with the author and the time on one line, "Alex, 8:49 am". For a reply, the
 next line is "Replying to @name: what they said", where Enter jumps to the
 original. Then comes the message, one line per line of text, and after it
 anything you can act on in the message: links, attachments, reactions, and
@@ -160,6 +160,15 @@ on the message you were on.</p>
 
 <p><strong>Alt+V</strong> in browse mode opens the message you are on, wherever
 the browse mode cursor is, without first moving focus to it.</p>
+
+<p>Browse mode covers every screen of the new client: text, announcement and
+forum channels and a forum post's thread, direct and group messages, every
+Friends tab, Discover, Quests, Shop, Nitro and Message Requests. It also covers
+the screens that open over them: Settings (each option reads once, as its
+switch or dropdown and its state, then its description), full user profiles and
+the profile cards from the member list, the Inbox and the status menu. A
+message's right-click menu switches NVDA to focus mode, as menus do on the
+web.</p>
 
 <p>The Electron client already has NVDA's own browse mode, so nothing changes
 there. To turn this off for the new client, open the NVDA menu, choose
@@ -226,9 +235,10 @@ checks the result.</p>
 
 <p>NVDA then says how many checks passed, names the first one that failed, and
 saves a full report to your Downloads folder as
-<code>discord_phoenix_check.txt</code>. Open a channel or direct message first,
-and show the member list, so the most checks can run; checks for parts that
-aren't on screen are skipped, not failed. The report contains no message text,
+<code>discord_phoenix_check.txt</code>. It first works out which screen you are
+on, such as a channel, a forum, the Friends page, Settings or a profile, and
+runs the checks for that screen, so run it on each screen you use. Checks for
+parts that aren't on screen are skipped, not failed. The report contains no message text,
 but it does name the channel or direct message you have open. If something
 fails after a Discord update, attaching the report to a bug report shows
 exactly what moved.</p>

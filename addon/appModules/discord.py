@@ -373,8 +373,10 @@ class AppModule(appModuleHandler.AppModule):
         name = (self._name(obj) or "").strip().lower()
         # "Members list for spam (channel)" sits beside the conversation and also ends
         # in "(channel)"; a voice channel's chat is "Text chat for voice channel X".
+        # A forum post opens beside the post list as "<post> (thread)", with its
+        # own message list.
         return ((name.endswith(CHANNEL_LANDMARK_SUFFIX) and not name.startswith("members list for"))
-                or name.startswith("text chat for voice channel"))
+                or name.startswith("text chat for voice channel") or name.endswith("(thread)"))
 
     def _findMessagesList(self):
         if self._listStillValid(self._cachedList):

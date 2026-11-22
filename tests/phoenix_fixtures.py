@@ -164,7 +164,8 @@ def friendsScreen():
     ])
     friends = group("Friends", [
         group("Friends", [text("Friends", headingLevel=1), node(pb.CT_TAB, "Friends", [
-            node(pb.CT_TABITEM, "Online", focusable=True, hasSelectionItem=True, selected=True)])]),
+            tab("Online", selected=True), tab("All"), tab("Pending, 1 new"), tab("Suggestions, 2 new"),
+            tab("Add Friend")])]),
         node(pb.CT_PANE, "Online — 2", [
             node(pb.CT_EDIT, "Search", focusable=True, hasValue=True, value=""),
             node(pb.CT_LIST, "", [
@@ -183,6 +184,244 @@ def friendsScreen():
     ])
     return window(sidebars(dms) + [friends, node(pb.CT_SEPARATOR, "Resize Sidebar", focusable=True)],
                   title="Friends - Discord")
+
+
+def tab(name, selected=False):
+    return node(pb.CT_TABITEM, name, focusable=True, hasSelectionItem=True, selected=selected)
+
+
+def dmSidebar():
+    return group("Private channels", [
+        button("Find or start a conversation", [text("Find or start a conversation")]),
+        node(pb.CT_LIST, "Direct Messages", [node(pb.CT_LISTITEM, "", [link("Friends 1")])], focusable=True),
+    ])
+
+
+def serverSidebar(server="Server One", channels=()):
+    return group("%s (server)" % server, [
+        button("%s, server actions" % server, hasInvoke=False, hasExpandCollapse=True),
+        node(pb.CT_LIST, "Channels", [node(pb.CT_LISTITEM, "", [link(c)]) for c in channels] or
+             [node(pb.CT_LISTITEM, "", [link("general (text channel)")])], focusable=True),
+    ])
+
+
+def page(title, content, windowTitle=None, channelsList=None):
+    """A page with no conversation: the content sits loose in the main pane."""
+    _ids[0] = 0
+    pane = sidebars(channelsList if channelsList is not None else dmSidebar())
+    pane[0] = text(title)
+    return window(pane + list(content) + [node(pb.CT_SEPARATOR, "Resize Sidebar", focusable=True)],
+                  title=windowTitle or "%s - Discord" % title)
+
+
+def dmScreen(group_=False):
+    """A DM (with the profile panel open), or a group DM."""
+    _ids[0] = 0
+    name = "Crew" if group_ else "Alex"
+    header = group("Channel header", [text("Direct Message"), button(name)]) if not group_ else \
+        group("Channel header", [button("Edit Group, %s" % name), button("Start Voice Call")])
+    msgs = node(pb.CT_LIST, "Messages in %s" % name, [
+        node(pb.CT_LISTITEM, "", [node(pb.CT_SEPARATOR, "21 October, 2026", focusable=True)]),
+        message("Alex", "hi there", "21/10/2026 8:59 pm", "Wednesday, 21 October, 2026 8:59 pm"),
+        message("Me", "hello", "21/10/2026 9:00 pm", "Wednesday, 21 October, 2026 9:00 pm"),
+    ], focusable=True)
+    conversation = group("%s (channel)" % name, [
+        text("%s chat" % name, headingLevel=2), node(pb.CT_DOCUMENT, "", [msgs]),
+        node(pb.CT_EDIT, "Message @%s" % name, focusable=True, hasValue=True, value=""),
+    ])
+    pane = sidebars(dmSidebar())
+    pane[0] = text("Direct Messages")
+    pane += [header, conversation]
+    if not group_:
+        pane.append(group("Alex's profile", [text("Alex's profile", headingLevel=2),
+                                            button("View Full Profile", [node(pb.CT_IMAGE, "alex_user, Online")])]))
+    return window(pane, title=("%s - Discord" % name) if group_ else "@Alex - Discord")
+
+
+def forumScreen(withThread=False):
+    """A forum channel's post list, optionally with a post open beside it."""
+    _ids[0] = 0
+    pane = sidebars(serverSidebar(channels=["news (forum channel)"]))
+    pane += [
+        group("Channel header", [text("Forum Channel"), text("Server One:", headingLevel=1),
+                                 text("news", headingLevel=1)]),
+        text("Threads", headingLevel=2),
+        node(pb.CT_LIST, "news", [
+            group("Create Post", [node(pb.CT_EDIT, "Post title", focusable=True), button("New Post")]),
+            node(pb.CT_LISTITEM, "", [button("Post Big release, 0 messages, out now", [text("Big release")]),
+                                      link("poster, post author")]),
+        ], focusable=True),
+    ]
+    if withThread:
+        pane += [
+            group("Thread header", [text("Thread:"), text("Big release", headingLevel=2), button("Close")]),
+            group("Big release (thread)", [
+                text("Big release chat", headingLevel=2),
+                node(pb.CT_DOCUMENT, "", [node(pb.CT_LIST, "Messages in Big release", [
+                    node(pb.CT_LISTITEM, "", [node(pb.CT_SEPARATOR, "new, 11 November, 2026", focusable=True)]),
+                    message("poster", "out now", "11/11/2026 3:47 am", "Wednesday, 11 November, 2026 3:47 am"),
+                ], focusable=True)]),
+                node(pb.CT_EDIT, "Message Big release", focusable=True, hasValue=True, value=""),
+            ]),
+        ]
+    return window(pane, title="#news | Server One - Discord")
+
+
+def announcementScreen():
+    _ids[0] = 0
+    msgs = node(pb.CT_LIST, "Messages in updates", [
+        node(pb.CT_LISTITEM, "", [text("This is the start of the #updates channel.")]),
+        node(pb.CT_LISTITEM, "", [node(pb.CT_SEPARATOR, "19 September, 2026", focusable=True)]),
+        message("Admin", "Version 2 is out", "19/9/2026 9:41 pm", "Saturday, 19 September, 2026 9:41 pm"),
+    ], focusable=True)
+    pane = sidebars(serverSidebar(channels=["updates (announcement channel)"]))
+    pane += [
+        group("Channel header", [text("Announcement Channel"), text("updates", headingLevel=1),
+                                 button("Follow")]),
+        group("updates (channel)", [text("updates chat", headingLevel=2), node(pb.CT_DOCUMENT, "", [msgs]),
+                                    text("Follow to get this channel's updates in your own server."),
+                                    button("Follow")]),
+    ]
+    return window(pane, title="#updates | Server One - Discord")
+
+
+def discoverScreen():
+    _ids[0] = 0
+    pane = sidebars(dmSidebar())
+    pane[0] = text("Discover")
+    pane[5] = group("", [text("Discover", headingLevel=1), node(pb.CT_TAB, "", [tab("Apps"), tab("Servers", True)])])
+    pane += [
+        text("", [text("Find your community on Discord")]),
+        text("Featured Servers", headingLevel=2),
+        button("View server", [text("Game Hub"), text("The official server for Game Hub."), text("5,000 Online")]),
+        node(pb.CT_TAB, "", [tab("Home", True), tab("Gaming")]),
+        node(pb.CT_EDIT, "Search", focusable=True),
+        node(pb.CT_SEPARATOR, "Resize Sidebar", focusable=True),
+    ]
+    return window(pane, title="Servers - Discord")
+
+
+def questsScreen():
+    return page("Quests", [
+        node(pb.CT_TAB, "", [tab("All Quests", True), tab("Claimed Quests")]),
+        button("View Quest", [text("Avatar Decoration"), text("15D 4H")]),
+        text("Available Quests", headingLevel=2),
+        group("GAME QUEST", [node(pb.CT_IMAGE, "Game quest banner"), text("Promoted by"),
+                             text("GAME QUEST", headingLevel=2, children=[text("Game Quest")]),
+                             text("700 Orbs"), button("Launch Quest")], focusable=True),
+    ])
+
+
+def shopScreen():
+    return page("Shop", [button("Discord Shop"), node(pb.CT_LIST, "", [node(pb.CT_LISTITEM, "", [link("Featured")])]),
+                         node(pb.CT_COMBOBOX, "Search the Shop", focusable=True)])
+
+
+def nitroScreen():
+    return page("Nitro", [text("Nitro", headingLevel=2), button("Gift Nitro")], windowTitle="Discord")
+
+
+def messageRequestsScreen():
+    return page("Message Requests", [node(pb.CT_TAB, "", [tab("Requests", True), tab("Spam (3)")]),
+                                     text("There are no pending message requests.")])
+
+
+def _modalWindow(modal, title="@Alex - Discord"):
+    _ids[0] = 1000
+    return node(pb.CT_WINDOW, title, [
+        node(pb.CT_PANE, "Discord", [], focusable=True),
+        modal,
+        button("Minimize"), button("Maximize"), button("Close"),
+    ])
+
+
+def settingsScreen():
+    """User Settings, Notifications page - a modal over an emptied main pane."""
+    _ids[0] = 0
+    row = lambda label, desc: group("", [text(label), text(desc), node(  # noqa: E731
+        pb.CT_BUTTON, label, focusable=True, hasToggle=True, toggleState=1)], focusable=True)
+    modal = node(pb.CT_WINDOW, "", [
+        group(), group(),
+        group("Settings sidebar", [text("Settings sidebar", headingLevel=2), node(pb.CT_LIST, "", [
+            node(pb.CT_LISTITEM, "", [text("General", headingLevel=3), node(pb.CT_TAB, "", [
+                tab("Account"), tab("Data & Privacy"), tab("Notifications", True), tab("Voice & Video"),
+                tab("Appearance"), tab("Accessibility")])])])]),
+        text("Notifications", headingLevel=1),
+        group("Breadcrumb", [node(pb.CT_LIST, "", [node(pb.CT_LISTITEM, "Notifications")])]),
+        button("Close"),
+        group("", [node(pb.CT_PANE, "", [group("Overview", [
+            text("Overview", headingLevel=2),
+            row("Enable Desktop Notifications", "Shows notifications on your desktop."),
+            row("Enable Taskbar Flashing", "Flashes the app in your taskbar."),
+            group("", [text("Someone reacts to my messages"), text("Someone reacts to my messages"),
+                       node(pb.CT_COMBOBOX, "Someone reacts to my messages", focusable=True, hasValue=True,
+                            value="All Messages", hasExpandCollapse=True)], focusable=True),
+        ], focusable=True)])], focusable=True),
+    ], focusable=True)
+    return _modalWindow(modal)
+
+
+def profileScreen():
+    """A full user profile - a modal named "<name>'s profile"."""
+    _ids[0] = 0
+    modal = node(pb.CT_WINDOW, "Alex's profile", [
+        text("Alex's profile", headingLevel=1),
+        button("View Profile Picture", [node(pb.CT_IMAGE, "alex_user, Online")]),
+        text("alex_user"), text("They/Them"),
+        group("User Badges", [link("Account Age"), text("Account Age Sequoia. 7 years, 2 months")]),
+        button("Message"), button("More", hasInvoke=False, hasExpandCollapse=True),
+        group("Member Since", [text("Member Since", headingLevel=2), text("Sep 17, 2019")]),
+        node(pb.CT_TAB, "", [tab("Activity", True), tab("3 Mutual Friends")]),
+        button("Close"),
+    ], focusable=True)
+    return _modalWindow(modal)
+
+
+def profileCardScreen():
+    """A member's profile card, opened from the member list - a modal with no tabs."""
+    _ids[0] = 0
+    modal = node(pb.CT_WINDOW, "Kim's profile", [
+        group(), group(),
+        text("Kim's profile", headingLevel=1),
+        button("View Full Profile", [node(pb.CT_IMAGE, "kim_user, Idle")]),
+        button("Kim", [text("Kim")]), text("He/Him"),
+        group("Bio", [text("Bio", headingLevel=2), group("Hello there.")]),
+        node(pb.CT_LIST, "Roles", [node(pb.CT_LISTITEM, "Mods", [text("Mods"), button("Remove role Mods")],
+                                        focusable=True)]),
+        node(pb.CT_EDIT, "Message @Kim", focusable=True),
+    ], focusable=True)
+    return _modalWindow(modal)
+
+
+def inboxScreen():
+    """The Inbox popup, Mentions tab - a modal named "Inbox"."""
+    _ids[0] = 0
+    mention = node(pb.CT_GROUP, "Kim Server Tag: ABCD , ping @Me , 7:10 am", [
+        text("Kim Server Tag: ABCD 7:10 am", headingLevel=3, children=[button("Kim", hasInvoke=False)]),
+        group("ping @Me", [text("ping @Me")]),
+    ], focusable=True)
+    modal = node(pb.CT_WINDOW, "Inbox", [
+        group(), group(), text("Inbox"), button("View Friend Requests, 0"),
+        node(pb.CT_TAB, "", [tab("Unreads"), tab("Mentions", True), tab("Bookmarks")]),
+        node(pb.CT_LISTITEM, "", [button("general, Server One › Text Channels"), button("Jump to Message")]),
+        mention,
+    ], focusable=True)
+    return _modalWindow(modal)
+
+
+def contextMenuScreen():
+    """A message's right-click menu - a menu beside the emptied main pane."""
+    _ids[0] = 0
+    item = lambda name, **kw: node(pb.CT_MENUITEM, name, focusable=True, hasInvoke=True, **kw)  # noqa: E731
+    return node(pb.CT_WINDOW, "#general | Server One - Discord", [
+        node(pb.CT_PANE, "Discord", [], focusable=True),
+        group(), group(),
+        button("Minimize"), button("Maximize"), button("Close"),
+        node(pb.CT_MENU, "Message Actions", [
+            item("Add Reaction: thumbsup :thumbsup: :+1: :thumbup:"),
+            node(pb.CT_SEPARATOR, ""), item("Reply"), item("Copy Text"),
+        ], focusable=True),
+    ])
 
 
 def lines(buf):

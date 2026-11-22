@@ -158,6 +158,7 @@ _LIST_MARKER_RE = re.compile(r"^(\d+[.)]|[a-z][.)]|[•◦▪‣-])$")
 # The clan tag Discord appends to names everywhere ("Alex Server Tag: ABCD").
 _SERVER_TAG_RE = re.compile(r"\s*Server Tag: [^\s,]+")
 _ICON_SUFFIX_RE = re.compile(r", [^,]* icon$", re.IGNORECASE)
+_SHORTCODES_RE = re.compile(r"(\s+:[\w+-]+:)+$")
 MESSAGE_ACTIONS_NAME = "message actions"
 JUMP_TO_REPLY_NAME = "jump to reply"
 # Window controls Phoenix draws as children of the window itself (automation
@@ -170,6 +171,26 @@ TOP_BAR_NAME = "Top bar"
 PAGE_CONTENT_NAME = "Page content"
 USER_AREA_NAME = "user status and settings"
 CHANNEL_HEADER_NAME = "channel header"
+THREAD_HEADER_NAME = "thread header"
+# Buttons named for what they do, with what they are in their children
+# (Discover's "View server" cards, Quests' "View Quest").
+ACTION_FIRST_LABELS = frozenset(("view server", "view quest"))
+# How far after a label text to look for the control it labels.
+LABEL_LOOKAHEAD = 3
+SETTINGS_SIDEBAR_NAME = "settings sidebar"
+
+
+def modalName(raw):
+    """A name for a modal window: its own, else "Settings", else its first heading."""
+    if raw.name:
+        return cleanText(raw.name)
+    for ch in raw.children:
+        if ch.controlType == CT_GROUP and _norm(ch.name or "") == SETTINGS_SIDEBAR_NAME:
+            return "Settings"
+    for ch in raw.children:
+        if ch.controlType == CT_TEXT and ch.headingLevel and ch.name:
+            return cleanText(ch.name)
+    return "Dialog"
 # Wording that only says what pressing a row does; the row's name follows it.
 LEAD_LABEL_PREFIXES = ("open conversation with ",)
 
@@ -304,21 +325,25 @@ def isMessageBody(raw):
     return raw.controlType == CT_GROUP and raw.focusable and " , " in (raw.name or "")
 
 
-def landmarkFor(name, depth):
+def landmarkFor(name, depth, inMainPane=True):
     """The ARIA landmark a top-level region maps to, or None.
 
     Phoenix has no landmarks, but its top-level groupings are exactly the
     regions the Electron client marked as landmarks, so D / Shift+D and the
-    Elements List can jump between them again. Depth 2 = window > pane > region.
+    Elements List can jump between them again. Depth 2 = window > pane >
+    region; inside a modal (Settings, a profile) depth 2 is the modal's own
+    parts, which are not sections of the window.
     """
     lower = name.lower()
-    if lower.startswith("members list for") or lower.endswith("'s profile"):
+    if lower.startswith("members list for") or lower.endswith("'s profile") \
+            or lower.endswith("(thread)"):
         return "complementary"
     if lower.endswith("(channel)") or lower.startswith("text chat for voice channel"):
         return "main"
-    if lower.endswith("(server)") or lower in ("servers sidebar", "private channels"):
+    if lower.endswith("(server)") or lower == "private channels" or lower.endswith("sidebar") \
+            or lower == "breadcrumb":
         return "navigation"
-    if depth == 2:
+    if depth == 2 and inMainPane:
         return "region"
     return None
 
@@ -446,6 +471,13 @@ class _Builder(object):
                 self.emit(node, value or " ")
             elif role in ("slider", "progressBar", "spinButton") and isinstance(raw.value, str) and raw.value:
                 self.emit(node, ("%s %s" % (name, cleanText(raw.value))).strip())
+            elif role == "comboBox" and isinstance(raw.value, str) and raw.value:
+                # A settings dropdown: "Someone reacts to my messages, All Messages".
+                self.emit(node, ", ".join(p for p in (name, cleanText(raw.value)) if p))
+                for ch in raw.children:
+                    self.foldSubtree(ch, node)
+                node.end = self.length
+                return self._finish(node, parent, role, depth)
             elif actsAsControl and len(raw.children) > 1:
                 self.emit(node, self._memberLine(raw, node) or _stripServerTag(name) or " ")
                 node.end = self.length
@@ -458,18 +490,33 @@ class _Builder(object):
                 if role == "link":
                     # "general (text channel), Text icon": the icon is decoration.
                     label = _ICON_SUFFIX_RE.sub("", label)
-                self.emit(node, self.foldedText(raw, label, node) or " ")
+                elif role == "menuItem":
+                    # "Add Reaction: thumbsup :thumbsup: :+1: :thumbup:": the
+                    # emoji's shortcodes after its name are for typing, not reading.
+                    label = _SHORTCODES_RE.sub("", label)
+                node.label = label
+                if _norm(label) in ACTION_FIRST_LABELS and raw.children:
+                    # "View server" + the server's name and description: say
+                    # what it is first, what pressing it does last.
+                    details = self.foldedText(raw, "", node)
+                    line = ", ".join(p for p in (details, label) if p)
+                else:
+                    line = self.foldedText(raw, label, node)
+                self.emit(node, line or " ")
                 node.end = self.length
                 return self._finish(node, parent, role, depth)
             else:
                 # Controls inside (an activity card's "open profile"): the text
                 # parts still make this control's own line - and its label, when
                 # it has no name of its own - and the inner controls follow.
-                parts, seen = ([name], [_norm(name)]) if name else ([], [])
+                actionFirst = _norm(name) in ACTION_FIRST_LABELS
+                parts, seen = ([name], [_norm(name)]) if name and not actionFirst else ([], [])
                 for ch in raw.children:
                     if semanticRole(ch) not in CONTROL_ROLES and not self.hasControlDescendant(ch):
                         self._collect(ch, parts, seen, node)
                         skip.add(id(ch))
+                if actionFirst:
+                    parts.append(name)  # "Avatar Decoration, ..., View Quest"
                 controlLine = ", ".join(parts)
                 self.emit(node, controlLine or " ")
                 controlLine = _norm(controlLine)
@@ -494,10 +541,21 @@ class _Builder(object):
                 self.emit(node, " ")
         else:
             # Container.
+            if depth == 1 and role == "window" and raw.children:
+                # A modal (Settings, a full profile) is a window inside the
+                # window; while it is open the main pane is empty. The modal is
+                # the page: one main landmark.
+                node.landmark = "main"
+                node.fieldName = modalName(raw)
+                node.alwaysReportName = True
+            inMainPane = parent is not None and parent.role == "pane" and parent.depth == 1
             if not isTreeRoot and name:
-                # Focusable groupings are cards (a quest, a message), not regions.
-                landmark = getattr(raw, "landmarkHint", None) or (landmarkFor(name, depth)
+                # Focusable groupings are cards (a quest, a message), not regions;
+                # inside a modal only its sidebar and breadcrumb are landmarks.
+                landmark = getattr(raw, "landmarkHint", None) or (landmarkFor(name, depth, inMainPane)
                                                 if role in ("grouping", "pane") and not raw.focusable else None)
+                if landmark == "region" and not inMainPane:
+                    landmark = None
                 if landmark:
                     node.landmark = landmark
                     node.fieldName = name
@@ -529,9 +587,11 @@ class _Builder(object):
         children = raw.children
         if depth == 1 and role == "pane":
             children = self._sections(raw)
+        else:
+            children = self._labelledControlsFirst(children, skip)
 
-        # Children. Text that only repeats a recent sibling ("Blind samurai"
-        # beside the server item "2 mentions, Blind samurai", or a friend's
+        # Children. Text that only repeats a recent sibling ("Server Two"
+        # beside the server item "2 mentions, Server Two", or a friend's
         # user name beside their avatar "sam1234, Idle") is dropped.
         recent = []
         childNodes = 0
@@ -556,6 +616,10 @@ class _Builder(object):
                 self.foldSubtree(ch, node)
                 continue
             chRole = semanticRole(ch)
+            if chRole in CONTROL_ROLES and chRole != "edit" and not cleanText(ch.name) \
+                    and not ch.children and not (isinstance(ch.value, str) and ch.value):
+                self.foldSubtree(ch, node)  # an unlabelled, empty button says only "button"
+                continue
             if summary and _norm(ch.name).startswith("server tag:"):
                 self.foldSubtree(ch, node)  # the clan tag of a replied-to author
                 continue
@@ -564,6 +628,12 @@ class _Builder(object):
                 continue
             if prevChild is not None and self._foldTooltip(
                     ch, chRole, prevChild, tooltipZone or (isConversation and afterEdit)):
+                continue
+            if chRole in ("grouping", "list") and ch.children and recent and not self.hasActionable(ch) \
+                    and self.childrenText(ch) and self.childrenText(ch) in " ".join(recent):
+                # A group that only repeats what was just said: Settings'
+                # breadcrumb, whose one entry is the page heading above it.
+                self.foldSubtree(ch, prevChild or node)
                 continue
             preview = None
             if chRole in CONTROL_ROLES and not self.hasControlDescendant(ch):
@@ -633,10 +703,27 @@ class _Builder(object):
                 return False
             lower = ch.name.lower()
             return (landmarkFor(ch.name, 2) in ("navigation", "complementary", "main")
-                    or lower in (USER_AREA_NAME, CHANNEL_HEADER_NAME))
+                    or lower in (USER_AREA_NAME, CHANNEL_HEADER_NAME, THREAD_HEADER_NAME))
+
+        def runName(run, preferTitle=False):
+            # Name a made-up section after what it holds: a named list (a
+            # forum's posts), else the page (for page content) or its first
+            # heading or text (for a menu).
+            for r in run:
+                if r.controlType == CT_LIST and r.name:
+                    return cleanText(r.name)
+            if preferTitle and title:
+                return title
+            stack = list(reversed(run))
+            while stack:
+                r = stack.pop()
+                if r.controlType == CT_TEXT and r.name:
+                    return cleanText(r.name)
+                stack.extend(reversed(r.children))
+            return title or PAGE_CONTENT_NAME
 
         out, run = [], []
-        state = {"seenSection": False, "mainGiven": hasMain}
+        state = {"seenSection": False, "mainGiven": hasMain, "seenUserArea": False}
 
         def flush(content):
             if not run:
@@ -644,13 +731,19 @@ class _Builder(object):
             if not state["seenSection"]:
                 section = RawNode(CT_GROUP, TOP_BAR_NAME, children=list(run))
                 section.landmarkHint = "banner"
+            elif not state["seenUserArea"]:
+                # Between the server list and the user area is where the
+                # channel or DM list goes; a page without one (Discover) puts
+                # its own menu there.
+                section = RawNode(CT_GROUP, runName(run), children=list(run))
+                section.landmarkHint = "navigation"
             elif len(run) == 1 and isNamedGroup(run[0]) and not state["mainGiven"]:
                 # A page whose content is already one named grouping
                 # ("Friends"): that grouping is the main landmark.
                 section = run[0]
                 section.landmarkHint = "main"
             else:
-                section = RawNode(CT_GROUP, title or PAGE_CONTENT_NAME, children=list(run))
+                section = RawNode(CT_GROUP, runName(run, preferTitle=True), children=list(run))
                 section.landmarkHint = "region" if state["mainGiven"] else "main"
             if section.landmarkHint == "main":
                 state["mainGiven"] = True
@@ -662,6 +755,8 @@ class _Builder(object):
                 flush(False)
                 if ch.controlType in (CT_GROUP, CT_PANE):
                     state["seenSection"] = True
+                if _norm(ch.name or "") == USER_AREA_NAME:
+                    state["seenUserArea"] = True
                 out.append(ch)
             else:
                 # Page content: loose elements and the groupings among them
@@ -743,7 +838,7 @@ class _Builder(object):
             badges = [cleanText(ch.name) for ch in header.children if ch.controlType == CT_IMAGE and ch.name]
             if names:
                 author = ", ".join(names + badges)
-        # The heading is who and when: "Orion, 8:49 am"; the message follows
+        # The heading is who and when: "Alex, 8:49 am"; the message follows
         # on its own lines, so a message of several lines reads in order.
         headingText = ", ".join(p for p in (author, stamp) if p)
         if headingText:
@@ -809,6 +904,30 @@ class _Builder(object):
                 self.foldSubtree(ch, jumpNode)
         return jumpNode
 
+    def _labelledControlsFirst(self, children, skip):
+        """Put a control where its separate label was, and drop the label.
+
+        A settings row (2026-11-22): GROUPING > TEXT "Enable Desktop
+        Notifications", TEXT "<description>", BUTTON (toggle) "Enable Desktop
+        Notifications". Read in order that is the name twice with the
+        description between; this gives the toggle and its state, then the
+        description.
+        """
+        out = list(children)
+        for i, ch in enumerate(children):
+            if ch.children or semanticRole(ch) in CONTROL_ROLES:
+                continue
+            label = _norm(cleanText(ch.name))
+            if not label:
+                continue
+            for later in children[i + 1:i + 1 + LABEL_LOOKAHEAD]:
+                if semanticRole(later) in CONTROL_ROLES and _norm(cleanText(later.name)) == label:
+                    j = out.index(later)
+                    out.pop(j)
+                    out[out.index(ch)] = later
+                    break
+        return out
+
     def _foldTooltip(self, raw, role, prevNode, inTooltipZone):
         """Merge a tooltip shown as text after its control. True if merged."""
         if raw.children or role in CONTROL_ROLES or role == "graphic":
@@ -825,6 +944,13 @@ class _Builder(object):
                   and (len(normText) == len(label) or not normText[len(label)].isalnum()))
         if not echoes and not (inTooltipZone and prevNode.role in ("button", "toggleButton")):
             return False
+        if echoes:
+            rest = text.strip()[len(label):].lstrip(" .,:;-")
+            if len(_norm(rest)) > 3:
+                # "Account Age Sequoia. 7 years, 2 months" after the "Account
+                # Age" badge: the label repeats, the rest is the badge's detail.
+                raw.name = rest
+                return False
         if not echoes and not prevNode.description:
             prevNode.description = text  # NVDA says it on B, Tab and focus
         self.foldSubtree(raw, prevNode)
@@ -859,7 +985,7 @@ class _Builder(object):
     def _finish(self, node, parent, role, depth):
         if node.end == node.start:
             return None  # nothing rendered
-        if parent is None or role == "window" or (depth == 1 and role == "pane"):
+        if parent is None or (depth == 1 and role == "pane"):
             node.isField = False
         elif role == "text" and not node.level:
             node.isField = False  # plain text: no field, nothing to announce
@@ -893,6 +1019,18 @@ class _Builder(object):
             r = stack.pop()
             if r.runtimeId:
                 self.folded.append((r.runtimeId, node))
+            stack.extend(r.children)
+
+    def hasActionable(self, raw):
+        """True if anything below raw can be pressed or typed in."""
+        return any(semanticRole(r) in CONTROL_ROLES for r in self._descendants(raw))
+
+    @staticmethod
+    def _descendants(raw):
+        stack = list(raw.children)
+        while stack:
+            r = stack.pop()
+            yield r
             stack.extend(r.children)
 
     def hasControlDescendant(self, raw):
