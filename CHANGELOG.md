@@ -23,7 +23,8 @@ the same commit that bumps the version.
   panel), NVDA+F7, find,
   and Enter to open DMs, links, servers and tabs. Friends, members, DMs and
   activity cards are one line each, and repeated labels, server tags and
-  tooltips don't clutter the reading. It keeps up with Discord while you
+  tooltips don't clutter the reading. Moving up past the oldest loaded message
+  loads older ones, as in the Electron client, without moving the mouse. It keeps up with Discord while you
   read, without moving you off the message you are on. NVDA+F5 refreshes it,
   Alt+V reads the message at the browse mode cursor, and it can be turned off
   in the add-on's settings.
