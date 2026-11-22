@@ -1243,6 +1243,10 @@ class _Builder(object):
             role = semanticRole(r)
             if role in CONTROL_ROLES and role != "button":
                 return False
+            if isHiddenSpoiler(r):
+                # Its label "Spoiler" is in the summary, but Enter on it is
+                # how the words are revealed: it needs its own line.
+                return False
             if role in NAME_IN_FIELD_ROLES:
                 return False
             text = _norm(cleanText(r.name) or (r.value if isinstance(r.value, str) else ""))

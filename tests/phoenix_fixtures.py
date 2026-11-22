@@ -196,6 +196,11 @@ def formattedScreen():
         message("Cy", "Spoiler Spoiler and a link https://example.com/", "12:23 pm", "", headed=False, content=[
             text(""), button("Spoiler", hasInvoke=False, hasExpandCollapse=True), text(""),
             link("https://example.com/")]),
+        # Spoilers the summary already names: the whole message, and at the end.
+        message("Cy", "Spoiler", "12:25 pm", "", headed=False, content=[
+            button("Spoiler", hasInvoke=False, hasExpandCollapse=True)]),
+        message("Cy", "this is Spoiler", "12:26 pm", "", headed=False, content=[
+            text(""), button("Spoiler", hasInvoke=False, hasExpandCollapse=True)]),
         message("Cy", "start here", "12:24 pm", "", headed=False,
                 extra=[button("Thread Plans 1 Message ›", [text("Plans"), text("1 Message ›")])]),
     ]

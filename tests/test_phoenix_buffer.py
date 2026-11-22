@@ -123,6 +123,11 @@ class FormattedMessages(unittest.TestCase):
         buf = pb.build(fx.inboxRoleIconScreen())
         self.assertIn("Dee, 10:09 am", fx.lines(buf))
 
+    def test_every_hidden_spoiler_is_a_button_of_its_own(self):
+        spoilers = [n for n in self.buf.nodes if pb.isHiddenSpoiler(n.raw) and n.role == "button"]
+        self.assertEqual(len(spoilers), 3)
+        self.assertEqual(self.after("Cy, 12:25 pm", 3)[1:], ["Spoiler", "Spoiler"])
+
     def test_hover_toolbar_left_out(self):
         self.assertNotIn("Click to react with thumbsup", self.lines)
         self.assertEqual(self.after("just text", 2)[1], "Bob, 12:12 pm")
