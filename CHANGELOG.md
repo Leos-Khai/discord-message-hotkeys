@@ -37,8 +37,9 @@ the same commit that bumps the version.
   work inside a thread.
 - **Formatted messages read block by block in the new client.** Code blocks
   read one line at a time, followed by their Copy button; quotes are block
-  quotes without Discord's "> " markers; headings and each list item (with its
-  number) get their own line instead of running together. A reply in a server
+  quotes without Discord's "> " markers; headings are headings at their level
+  (H, 1, 2 and so on find them); each list item (with its number) gets its own
+  line instead of running together. A reply in a server
   says who it replies to; an edited message says "(edited)" once and no longer
   repeats its text while you edit it; a thread started from a message follows
   it as its own button; the toolbar Discord shows under the mouse is left out

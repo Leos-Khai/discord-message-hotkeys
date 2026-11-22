@@ -1058,7 +1058,17 @@ class _Builder(object):
                 self.foldSubtree(ch, quote)
                 continue
             line = self._contentText(ch)
-            if line:
+            if line and ch.controlType == CT_TEXT and ch.headingLevel:
+                # "# Big" / "## Smaller" in a message: a heading at its level,
+                # as in the Electron client (1 and 1 to 6 find them).
+                heading = Node(ch, "heading", parent, depth)
+                heading.level = ch.headingLevel
+                heading.label = line
+                heading.start = self.length
+                self.emit(heading, line)
+                heading.end = self.length
+                self.foldSubtree(ch, heading)
+            elif line:
                 textNode = Node(ch, "text", parent, depth)
                 textNode.isField = False
                 textNode.start = self.length

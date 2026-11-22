@@ -93,6 +93,10 @@ class FormattedMessages(unittest.TestCase):
         self.assertEqual(self.after("a quote", 3), ["a quote", "more quote", "after"])
         self.assertEqual(self.buf.nodeAt(self.buf.text.index("more quote")).role, "blockQuote")
 
+    def test_message_heading_is_a_heading_at_its_level(self):
+        node = self.buf.nodeAt(self.buf.text.index("Smaller heading"))
+        self.assertEqual((node.role, node.level, node.isField), ("heading", 2, True))
+
     def test_heading_and_list_items_each_on_their_own_line(self):
         self.assertEqual(self.after("Smaller heading", 3), ["Smaller heading", "bullet one", "1. first"])
         item = self.buf.nodeAt(self.buf.text.index("1. first"))
